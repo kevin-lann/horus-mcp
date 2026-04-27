@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scanner-mcp"
+version = "0.1.0"
+description = "MCP server for market research, signal scanning, and charts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=0.9",
+    "yfinance>=0.2",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "polars>=0.20",
+    "apscheduler>=3.10",
+    "plotly>=5.20",
+    "kaleido>=0.2",
+    "plyer>=2.1",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+scanner-mcp = "scanner_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
