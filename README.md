@@ -100,6 +100,9 @@ python3 test.py --tool delete_signal --mutate --signal-id 1
 
 By default, `scan` does not pass a ticker override. It lets each persisted signal use its own `ticker_overrides`, or the global watchlist when a signal has no overrides. Add `--symbols` only when you want to override the scan tickers for the test run.
 
+## Testing MCP server locally
+Use the
+
 ## Resources
 
 - `signals://triggered` — recent alerts (JSON)

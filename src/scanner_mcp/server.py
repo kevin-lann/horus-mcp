@@ -40,6 +40,7 @@ MARKET_SNAPSHOT: dict[str, list[str]] = {
 
 
 def _shutdown_scheduler() -> None:
+    """Stop the background scheduler if it was started."""
     global _sched
     if _sched is None:
         return
@@ -53,6 +54,7 @@ def _shutdown_scheduler() -> None:
 
 
 def _get_store() -> Store:
+    """Lazily create the SQLite store, honoring SCANNER_MCP_DB."""
     global _store
     if _store is None:
         path = os.environ.get("SCANNER_MCP_DB")
@@ -61,6 +63,7 @@ def _get_store() -> Store:
 
 
 def _get_provider() -> YFinanceProvider:
+    """Lazily create the shared market data provider."""
     global _provider
     if _provider is None:
         _provider = YFinanceProvider()
@@ -68,6 +71,7 @@ def _get_provider() -> YFinanceProvider:
 
 
 def _parse_ind(name: str) -> tuple[str, dict[str, Any]]:
+    """Parse indicator specs like `rsi:14` into a key and parameter dict."""
     s = name.strip().lower()
     if ":" in s:
         k, rest = s.split(":", 1)
@@ -81,6 +85,7 @@ def _parse_ind(name: str) -> tuple[str, dict[str, Any]]:
 
 @asynccontextmanager
 async def _lifespan(_: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """FastMCP lifespan hook that starts and stops the scan scheduler."""
     global _sched
     st = _get_store()
     pr = _get_provider()
@@ -102,6 +107,11 @@ def _compute_indicators(
     names: list[str],
     period: str,
 ) -> dict[str, Any]:
+    """Compute requested indicators and attach per-indicator ratings.
+
+    Unknown indicator names are represented as errors in the output instead of
+    failing the whole tool response.
+    """
     pr = _get_provider()
     df = pr.get_history(sym, period=period, interval="1d")
     if df is None or df.empty:
@@ -169,6 +179,7 @@ def _compute_indicators(
 
 
 def _as_float(value: Any) -> float | None:
+    """Best-effort float conversion that treats NaN and invalid input as None."""
     if value is None:
         return None
     try:
@@ -181,6 +192,7 @@ def _as_float(value: Any) -> float | None:
 
 
 def _first_present(data: dict[str, Any], *keys: str) -> Any:
+    """Return the first non-None value among several possible dictionary keys."""
     for key in keys:
         if key in data and data[key] is not None:
             return data[key]
@@ -188,6 +200,7 @@ def _first_present(data: dict[str, Any], *keys: str) -> Any:
 
 
 def _quote_from_history(p: YFinanceProvider, symbol: str) -> dict[str, float | None]:
+    """Fallback quote calculation from recent daily closes."""
     df = p.get_history(symbol, period="10d", interval="1d")
     if df is None or df.empty or "Close" not in df.columns:
         cols = [] if df is None else list(df.columns)
@@ -209,6 +222,7 @@ def _quote_from_history(p: YFinanceProvider, symbol: str) -> dict[str, float | N
 
 
 def _quote_snapshot(p: YFinanceProvider, symbol: str) -> dict[str, Any]:
+    """Resolve last price and daily change from fast_info with history fallback."""
     f = p.get_fast_info(symbol) or {}
     log.debug("quote snapshot fast_info %s keys=%s", symbol, sorted(f.keys()))
     last = _as_float(_first_present(f, "last_price", "lastPrice"))
@@ -403,7 +417,12 @@ def create_signal(
     params: str = "{}",
     ticker_overrides: str | None = None,
 ) -> str:
-    """Create a persisted signal. params is JSON object. ticker_overrides is JSON list or null = use global watchlist."""
+    """Create a persisted enabled signal.
+
+    `params` must be a JSON object merged with catalog defaults.
+    `ticker_overrides` may be a JSON list; when omitted, scans use the global
+    watchlist for this signal.
+    """
     if signal_type not in CATALOG:
         return json.dumps({"error": f"invalid signal_type: {signal_type}"})
     try:
@@ -452,19 +471,93 @@ def delete_signal(signal_id: int) -> str:
 def run_scan(
     signal_id: int | None = None,
     tickers: str | None = None,
+    all_signal_types: bool = False,
+    symbol: str | None = None,
 ) -> str:
-    """On-demand scan. tickers: JSON list or null. If signal_id set, only that signal."""
-    st = _get_store()
+    """Run an on-demand scan and return only triggered results.
+
+    When `tickers` is omitted, each signal uses its own ticker overrides or the
+    global watchlist. When `signal_id` is set, only that enabled signal is
+    evaluated. Set `all_signal_types` with `symbol` or `tickers` to evaluate
+    every catalog signal type and return the triggered matches.
+    """
     pr = _get_provider()
     tick_list: list[str] | None = None
+    if symbol and tickers:
+        return json.dumps({"error": "pass either symbol or tickers, not both"})
+    if symbol:
+        tick_list = [symbol.upper()]
     if tickers:
         try:
             t = json.loads(tickers)
             if isinstance(t, list):
-                tick_list = [str(x).upper() for x in t]
+                tick_list = [str(x).upper() for x in t if str(x).strip()]
+            else:
+                return json.dumps({"error": "tickers must be a JSON array of strings"})
         except json.JSONDecodeError as e:
-            return json.dumps({"error": str(e)})
+            return json.dumps(
+                {
+                    "error": f"tickers JSON: {e}",
+                    "hint": "Use valid JSON with double quotes, e.g. [\"AAPL\", \"MSFT\"].",
+                }
+            )
 
+    if all_signal_types:
+        if signal_id is not None:
+            return json.dumps({"error": "signal_id cannot be used with all_signal_types"})
+        if not tick_list:
+            return json.dumps({"error": "all_signal_types requires symbol or tickers"})
+
+        triggered_results: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        checked = 0
+        for sym in tick_list:
+            try:
+                df = pr.get_history(sym, period="1y", interval="1d")
+            except Exception as e:  # noqa: BLE001
+                errors.append({"symbol": sym, "error": str(e)})
+                continue
+            if df is None or df.empty:
+                errors.append({"symbol": sym, "error": "no_history"})
+                continue
+
+            for signal_type in CATALOG:
+                checked += 1
+                params = merge_params(signal_type, {})
+                asig = ActiveSignal(
+                    id=0,
+                    name=signal_type,
+                    signal_type=signal_type,
+                    params=params,
+                    ticker_overrides=[sym],
+                )
+                trig, det = evaluate(asig, df)
+                if trig:
+                    triggered_results.append(
+                        {
+                            "signal_type": signal_type,
+                            "name": signal_type,
+                            "symbol": sym,
+                            "params": params,
+                            "triggered": True,
+                            "details": det,
+                        }
+                    )
+        return json.dumps(
+            {
+                "symbols": tick_list,
+                "mode": "all_signal_types",
+                "results": triggered_results,
+                "count": len(triggered_results),
+                "triggered_count": len(triggered_results),
+                "checked_count": checked,
+                "errors": errors,
+            },
+            indent=2,
+            default=str,
+        )
+
+    st = _get_store()
     results: list[dict[str, Any]] = []
     srows = st.signal_list()
     if signal_id is not None:
@@ -544,7 +637,11 @@ def generate_chart(
     chart_type: str,
     params: str = "{}",
 ) -> str:
-    """Build chart, returns JSON with image/png base64. params is JSON. Types: price_history, price_overlay, forward_returns, drawdown_comparison, log_cycle."""
+    """Build a chart and return JSON containing image/png base64 data.
+
+    `params` is a JSON object string. Supported types are `price_history`,
+    `price_overlay`, `forward_returns`, `drawdown_comparison`, and `log_cycle`.
+    """
     pr = _get_provider()
     try:
         p = json.loads(params) if params else {}
@@ -589,6 +686,7 @@ def resource_forward_returns(symbol: str, event_type: str) -> str:
 
 
 def main() -> None:
+    """Configure logging and run the FastMCP stdio server."""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     log_file = os.environ.get("SCANNER_MCP_LOG_FILE")
     if log_file:

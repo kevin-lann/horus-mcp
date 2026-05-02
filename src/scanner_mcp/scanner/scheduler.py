@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 
 def _scan_job(store: Store, provider: YFinanceProvider) -> None:
+    """APScheduler entrypoint that logs and swallows scan failures."""
     try:
         run_full_scan(store, provider, notify=True)
     except Exception:  # noqa: BLE001
@@ -34,6 +35,12 @@ def run_full_scan(
     *,
     notify: bool = True,
 ) -> dict[str, Any]:
+    """Evaluate all enabled signals and persist alerts for triggered results.
+
+    Each signal uses its `ticker_overrides` when present, otherwise the global
+    watchlist. The result counts every fetched symbol/signal pair checked and
+    includes only fired alerts in the `alerts` list.
+    """
     result: dict[str, Any] = {"checked": 0, "fired": 0, "alerts": []}
     try:
         sig_rows = [s for s in store.signal_list() if s.enabled]
@@ -94,6 +101,11 @@ def start_scheduler(
     store: Store,
     provider: YFinanceProvider,
 ) -> BackgroundScheduler:
+    """Start the daily end-of-day scan scheduler.
+
+    `SCAN_TIME` may be set as `HH:MM` in Eastern time; invalid values fall back
+    to 16:30 ET.
+    """
     sched = BackgroundScheduler(
         timezone=ZoneInfo("America/New_York"),
         daemon=True,

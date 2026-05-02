@@ -60,6 +60,7 @@ CATALOG: dict[str, dict[str, Any]] = {
 
 
 def list_catalog_entries() -> list[dict[str, Any]]:
+    """Return public signal catalog metadata for clients and prompts."""
     return [
         {
             "signal_type": k,
@@ -71,6 +72,7 @@ def list_catalog_entries() -> list[dict[str, Any]]:
 
 
 def merge_params(signal_type: str, params: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge user-provided params over catalog defaults for a signal type."""
     if signal_type not in CATALOG:
         raise ValueError(f"Unknown signal_type: {signal_type}")
     base = dict(CATALOG[signal_type]["default_params"])

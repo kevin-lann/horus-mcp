@@ -1,4 +1,4 @@
-"""Plotly charts exported as base64 PNG."""
+"""Build Plotly charts for MCP responses and optional local debug PNGs."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ _OUTPUT_DIR = _PROJECT_ROOT / "output"
 
 
 def _save_debug_png(chart_type: str, png_bytes: bytes) -> None:
+    """Persist a generated PNG under project-root/output for local debugging."""
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     filename = f"{chart_type}_{timestamp}_{uuid4().hex[:8]}.png"
@@ -32,6 +33,7 @@ def _save_debug_png(chart_type: str, png_bytes: bytes) -> None:
 
 
 def _fig_to_b64(fig: go.Figure, chart_type: str) -> str:
+    """Render a Plotly figure to PNG bytes, save a debug copy, and return base64."""
     buf = io.BytesIO()
     fig.write_image(buf, format="png", engine="kaleido", scale=1.5)
     buf.seek(0)
@@ -48,7 +50,12 @@ def generate_chart(
     chart_type: str,
     params: dict[str, Any],
 ) -> dict[str, str]:
-    """Return {\"mime\": \"image/png\", \"data\": base64}."""
+    """Dispatch a supported chart type and return an MCP-safe image payload.
+
+    The returned dictionary is JSON serializable and contains a PNG MIME type plus
+    base64 image data. Rendering errors and unknown chart types are intentionally
+    raised for the MCP tool wrapper to convert into an error response.
+    """
     ct = chart_type.lower().strip()
     if ct == "price_history":
         return _price_history(provider, params)
@@ -64,6 +71,7 @@ def generate_chart(
 
 
 def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
     interval = p.get("interval", "1d")
@@ -87,6 +95,7 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
 
 
 def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Plot multiple symbols on one line chart, optionally normalized to 100."""
     syms: list = p.get("symbols") or ["SPY", "QQQ"]
     period = p.get("period", "1y")
     norm = p.get("normalize", True)
@@ -107,7 +116,7 @@ def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
 
 
 def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
-    """Histogram of forward returns N days after RSI oversold events."""
+    """Build histograms of forward returns after a labeled event type."""
     from scanner_mcp.research.forward_returns import compute_event_forward_returns  # local import
 
     sym = str(p.get("symbol", "SPY"))
@@ -132,6 +141,7 @@ def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dic
 
 
 def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Compare percentage drawdowns from each symbol's running high."""
     syms: list = p.get("symbols") or ["^GSPC", "QQQ"]
     period = p.get("period", "5y")
     fig = go.Figure()
@@ -148,6 +158,7 @@ def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
 
 
 def _log_cycle(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Plot weekly log10 close values for long-cycle price inspection."""
     sym = str(p.get("symbol", "BTC-USD"))
     period = p.get("period", "max")
     df = provider.get_history(sym, period=str(period), interval="1wk")

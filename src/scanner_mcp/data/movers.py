@@ -44,6 +44,7 @@ _CRYPTO_TICKERS = [
 
 
 def _quote_to_row(q: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize one Yahoo screener quote into the mover row schema."""
     sym = q.get("symbol")
     if not sym:
         return None
@@ -70,6 +71,7 @@ def _filter_quotes(
     quotes: list[dict[str, Any]],
     exchange: Exchange,
 ) -> list[dict[str, Any]]:
+    """Keep only screener quotes that belong to the requested equity exchange."""
     if exchange == "CRYPTO":
         return []
     codes = _EXCHANGE_SETS[exchange]
@@ -88,6 +90,7 @@ def screen_movers(
     exchange: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
+    """Return top gainers or losers for an equity exchange or crypto universe."""
     ex = exchange.upper() if exchange else "NYSE"
     if ex not in _EXCHANGE_SETS and ex != "CRYPTO":
         raise ValueError(f"Invalid exchange: {exchange}. Use NYSE, NASDAQ, AMEX, or CRYPTO.")
@@ -118,6 +121,7 @@ def _crypto_movers(
     which: Literal["gainers", "losers"],
     limit: int,
 ) -> list[dict[str, Any]]:
+    """Rank a fixed list of liquid crypto pairs by daily percentage change."""
     tks = yf.Tickers(" ".join(_CRYPTO_TICKERS))
     m = tks.tickers
     rows: list[dict[str, Any]] = []

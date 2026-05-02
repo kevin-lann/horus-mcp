@@ -18,6 +18,8 @@ _HISTORY_DAILY_TTL = 6 * 60 * 60.0 # 6 hours
 
 
 class DataProvider(ABC):
+    """Interface used by tools, charts, and scans to fetch market data."""
+
     @abstractmethod
     def get_history(
         self,
@@ -25,20 +27,29 @@ class DataProvider(ABC):
         *,
         period: str = "6mo",
         interval: str = "1d",
-    ) -> pd.DataFrame: ...
+    ) -> pd.DataFrame:
+        """Return OHLCV history for a symbol, or an empty DataFrame on failure."""
+        ...
 
     @abstractmethod
-    def get_fast_info(self, symbol: str) -> dict[str, Any]: ...
+    def get_fast_info(self, symbol: str) -> dict[str, Any]:
+        """Return quote-like metadata for a symbol, or an empty dict on failure."""
+        ...
 
     @abstractmethod
-    def get_option_chain(self, symbol: str, expiry: str | None) -> dict[str, Any]: ...
+    def get_option_chain(self, symbol: str, expiry: str | None) -> dict[str, Any]:
+        """Return option chain frames and expiries, or an error dictionary."""
+        ...
 
 
 def _empty_df() -> pd.DataFrame:
+    """Return a fresh empty history frame for provider failure paths."""
     return pd.DataFrame()
 
 
 class YFinanceProvider(DataProvider):
+    """YFinance-backed provider with short-lived in-memory caching."""
+
     def __init__(self) -> None:
         self._cache: TTLCache[Any] = TTLCache(300.0)
         self._hist_cache: TTLCache[pd.DataFrame] = TTLCache(_HISTORY_DAILY_TTL)
@@ -50,6 +61,11 @@ class YFinanceProvider(DataProvider):
         period: str = "6mo",
         interval: str = "1d",
     ) -> pd.DataFrame:
+        """Fetch historical OHLCV data and cache by symbol, period, and interval.
+
+        Intraday intervals get a shorter TTL than daily/weekly style history. The
+        returned DataFrame is copied so callers cannot mutate cached data.
+        """
         sym = symbol.strip().upper()
         key = ("hist", sym, period, interval)
         hit = self._hist_cache.get(key)
@@ -71,6 +87,7 @@ class YFinanceProvider(DataProvider):
         return df.copy()
 
     def get_fast_info(self, symbol: str) -> dict[str, Any]:
+        """Fetch yfinance fast_info with a one-minute cache."""
         sym = symbol.strip().upper()
         key = ("fi", sym)
         hit = self._cache.get(key)
@@ -89,6 +106,7 @@ class YFinanceProvider(DataProvider):
         return fi
 
     def get_option_chain(self, symbol: str, expiry: str | None) -> dict[str, Any]:
+        """Fetch calls, puts, and available expiries for a symbol."""
         sym = symbol.strip().upper()
         t = yf.Ticker(sym)
         try:

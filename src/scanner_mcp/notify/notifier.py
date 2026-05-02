@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 
 
 def notify_desktop(title: str, message: str) -> None:
+    """Best-effort desktop notification; failures are logged at debug level."""
     try:
         from plyer import notification  # type: ignore[import-not-found]
 

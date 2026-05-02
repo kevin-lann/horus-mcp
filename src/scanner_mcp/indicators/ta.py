@@ -9,14 +9,17 @@ import pandas as pd
 
 
 def sma(close: pd.Series, length: int) -> pd.Series:
+    """Return a simple moving average with NaN until `length` bars exist."""
     return close.astype(float).rolling(window=length, min_periods=length).mean()
 
 
 def ema(close: pd.Series, length: int) -> pd.Series:
+    """Return an exponential moving average with NaN until `length` bars exist."""
     return close.astype(float).ewm(span=length, adjust=False, min_periods=length).mean()
 
 
 def rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    """Return Wilder-style RSI values for a close series."""
     close = close.astype(float)
     delta = close.diff()
     gain = delta.clip(lower=0.0)
@@ -34,6 +37,7 @@ def macd(
     slow: int = 26,
     signal: int = 9,
 ) -> pd.DataFrame:
+    """Return MACD, signal, and histogram columns named like pandas-ta output."""
     fast_ema = ema(close, fast)
     slow_ema = ema(close, slow)
     macd_line = fast_ema - slow_ema
@@ -49,6 +53,7 @@ def macd(
 
 
 def bbands(close: pd.Series, length: int = 20, std: float = 2.0) -> pd.DataFrame:
+    """Return lower, middle, and upper Bollinger Band columns."""
     close = close.astype(float)
     mid = sma(close, length)
     dev = close.rolling(window=length, min_periods=length).std(ddof=0)

@@ -40,13 +40,14 @@ class AlertRow:
 
 
 def _default_db_path() -> Path:
+    """Return the default SQLite DB path and ensure its parent exists."""
     p = Path.home() / ".scanner_mcp" / "data.db"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 class Store:
-    """Thread-safe SQLite store."""
+    """Thread-safe SQLite store for watchlists, signals, and alert history."""
 
     def __init__(self, path: Path | str | None = None) -> None:
         self._path = Path(path) if path else _default_db_path()
@@ -55,6 +56,7 @@ class Store:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """Yield a locked SQLite connection and commit after successful use."""
         with self._lock:
             c = sqlite3.connect(self._path)
             c.row_factory = sqlite3.Row
@@ -65,6 +67,7 @@ class Store:
                 c.close()
 
     def _init_schema(self) -> None:
+        """Create tables and indexes if this is a fresh database."""
         with self._conn() as c:
             c.executescript(
                 """
@@ -96,6 +99,7 @@ class Store:
 
     # watchlist
     def watchlist_add(self, symbols: Sequence[str]) -> list[str]:
+        """Insert uppercase watchlist symbols and return only newly added ones."""
         now = _utc_now()
         added: list[str] = []
         with self._conn() as c:
@@ -113,6 +117,7 @@ class Store:
         return added
 
     def watchlist_remove(self, symbols: Sequence[str]) -> int:
+        """Remove watchlist symbols and return the number of deleted rows."""
         n = 0
         with self._conn() as c:
             for sym in symbols:
@@ -121,6 +126,7 @@ class Store:
         return n
 
     def watchlist_get(self) -> list[WatchlistRow]:
+        """Return the current watchlist sorted by symbol."""
         with self._conn() as c:
             rows = c.execute("SELECT id, symbol, added_at FROM watchlist ORDER BY symbol")
             return [WatchlistRow(int(r[0]), r[1], r[2]) for r in rows]
@@ -133,6 +139,7 @@ class Store:
         params: dict[str, Any],
         ticker_overrides: list[str] | None,
     ) -> int:
+        """Persist an enabled signal and return its database ID."""
         now = _utc_now()
         with self._conn() as c:
             c.execute(
@@ -151,22 +158,26 @@ class Store:
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     def signal_list(self) -> list[SignalRow]:
+        """Return all configured signals ordered by ID."""
         with self._conn() as c:
             rows = c.execute("SELECT * FROM signals ORDER BY id")
             return [_row_to_signal(r) for r in rows]
 
     def signal_get(self, signal_id: int) -> SignalRow | None:
+        """Return one signal by ID, or None if it does not exist."""
         with self._conn() as c:
             r = c.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
             return _row_to_signal(r) if r else None
 
     def signal_delete(self, signal_id: int) -> bool:
+        """Delete a signal and its alert history; return whether it existed."""
         with self._conn() as c:
             c.execute("DELETE FROM alerts WHERE signal_id = ?", (signal_id,))
             cur = c.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
             return (cur.rowcount or 0) > 0
 
     def signal_set_enabled(self, signal_id: int, enabled: bool) -> bool:
+        """Enable or disable a signal by ID; return whether it existed."""
         with self._conn() as c:
             cur = c.execute("UPDATE signals SET enabled = ? WHERE id = ?", (1 if enabled else 0, signal_id))
             return (cur.rowcount or 0) > 0
@@ -178,6 +189,7 @@ class Store:
         symbol: str,
         details: dict[str, Any],
     ) -> int:
+        """Persist one triggered alert and return its database ID."""
         now = _utc_now()
         with self._conn() as c:
             c.execute(
@@ -187,6 +199,7 @@ class Store:
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     def alerts_recent(self, limit: int = 50) -> list[AlertRow]:
+        """Return the newest alert rows, newest first."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT ?",
@@ -196,6 +209,7 @@ class Store:
 
 
 def _row_to_signal(r: sqlite3.Row) -> SignalRow:
+    """Convert a SQLite signal row into a typed dataclass."""
     ov = r["ticker_overrides"]
     return SignalRow(
         id=int(r["id"]),
@@ -209,6 +223,7 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
 
 
 def _row_to_alert(r: sqlite3.Row) -> AlertRow:
+    """Convert a SQLite alert row into a typed dataclass."""
     d = r["details"]
     return AlertRow(
         id=int(r["id"]),
@@ -220,4 +235,5 @@ def _row_to_alert(r: sqlite3.Row) -> AlertRow:
 
 
 def _utc_now() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()

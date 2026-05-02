@@ -14,7 +14,11 @@ log = logging.getLogger(__name__)
 
 
 class Indicators:
-    """Vectorized-friendly indicator helpers. Instantiated with adjusted-close history."""
+    """Latest-value indicator facade over an OHLCV DataFrame.
+
+    Methods return plain floats/dicts for MCP JSON serialization and use `None`
+    when there is not enough data to compute a meaningful value.
+    """
 
     def __init__(self, df: pd.DataFrame) -> None:
         self._df = df
@@ -25,9 +29,11 @@ class Indicators:
 
     @property
     def empty(self) -> bool:
+        """Whether the input lacks enough close data for indicator calculations."""
         return self._df is None or self._df.empty or len(self._close) < 2
 
     def rsi(self, period: int = 14) -> float | None:
+        """Return the latest RSI value for `period`, or None if unavailable."""
         if self.empty or len(self._close) < period + 1:
             return None
         s = ta.rsi(self._close, length=period)
@@ -44,6 +50,7 @@ class Indicators:
         slow: int = 26,
         signal: int = 9,
     ) -> dict[str, float | None] | None:
+        """Return latest MACD line, signal line, histogram, and prior histogram."""
         if self.empty or len(self._close) < slow + 5:
             return None
         out = ta.macd(self._close, fast=fast, slow=slow, signal=signal)
@@ -77,6 +84,7 @@ class Indicators:
         }
 
     def bbands(self, period: int = 20, std: float = 2.0) -> dict[str, float | None] | None:
+        """Return latest Bollinger Bands and percent-B position."""
         if self.empty or len(self._close) < period:
             return None
         out = ta.bbands(self._close, length=period, std=std)
@@ -99,6 +107,7 @@ class Indicators:
         return {"upper": up, "mid": midv, "lower": lo, "pct_b": float(pct_b)}
 
     def sma(self, period: int) -> float | None:
+        """Return the latest simple moving average for `period` bars."""
         if self.empty or len(self._close) < period:
             return None
         s = ta.sma(self._close, length=period)
@@ -110,6 +119,7 @@ class Indicators:
         return float(v)
 
     def ema(self, period: int) -> float | None:
+        """Return the latest exponential moving average for `period` bars."""
         if self.empty or len(self._close) < period:
             return None
         s = ta.ema(self._close, length=period)
@@ -121,6 +131,7 @@ class Indicators:
         return float(v)
 
     def ath_distance(self) -> float | None:
+        """Return percent distance from the all-time high as a negative/zero value."""
         if self.empty:
             return None
         hi = self._df["High"] if "High" in self._df else self._close
@@ -131,6 +142,7 @@ class Indicators:
         return (last - ath) / ath * 100.0
 
     def last_close(self) -> float | None:
+        """Return the latest close value as a float."""
         if self.empty:
             return None
         v = self._close.iloc[-1]
@@ -143,6 +155,11 @@ def beta_from_returns(
     sym_returns: pd.Series,
     bench_returns: pd.Series,
 ) -> float | None:
+    """Compute beta of a symbol's returns against benchmark returns.
+
+    Returns None when the aligned return series is too short or benchmark
+    variance is effectively zero.
+    """
     a = sym_returns.dropna()
     b = bench_returns.dropna()
     joined = a.align(b, join="inner")

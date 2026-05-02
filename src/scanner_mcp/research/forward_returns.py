@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 def _events_rsi(
     close: pd.Series, *, oversold: bool, period: int, thr: float
 ) -> list[int]:
+    """Return indexes where RSI crosses into an overbought/oversold zone."""
     r = ta.rsi(close, length=period)
     if r is None or r.empty:
         return []
@@ -39,6 +40,7 @@ def compute_event_forward_returns(
     windows: list[int],
     period: str = "10y",
 ) -> dict[int, list[float]]:
+    """Compute forward percentage returns after a supported event type."""
     df = provider.get_history(symbol, period=period, interval="1d")
     if df is None or df.empty or "Close" not in df.columns:
         return {}
@@ -75,6 +77,7 @@ def forward_returns_markdown(
     symbol: str,
     event_type: str,
 ) -> str:
+    """Render forward-return summary statistics as a Markdown table."""
     windows = [7, 30, 90]
     res = compute_event_forward_returns(
         provider, symbol, event_type, windows, period="10y"

@@ -33,6 +33,7 @@ DEFAULT_SYMBOLS = ["SPY", "QQQ"]
 
 
 def _parse_jsonish(value: str) -> Any:
+    """Parse JSON output when possible, otherwise keep raw text."""
     try:
         return json.loads(value)
     except json.JSONDecodeError:
@@ -40,6 +41,7 @@ def _parse_jsonish(value: str) -> Any:
 
 
 def _compact_chart_payload(payload: Any) -> Any:
+    """Replace large base64 chart data with a readable terminal summary."""
     if not isinstance(payload, dict):
         return payload
     data = payload.get("data")
@@ -50,6 +52,7 @@ def _compact_chart_payload(payload: Any) -> Any:
 
 
 def _print_result(name: str, raw: str) -> None:
+    """Pretty-print a tool response in a consistent local-test format."""
     print(f"\n=== {name} ===")
     parsed = _parse_jsonish(raw)
     parsed = _compact_chart_payload(parsed)
@@ -60,10 +63,12 @@ def _print_result(name: str, raw: str) -> None:
 
 
 def _symbols(args: argparse.Namespace) -> list[str]:
+    """Return CLI symbols or the script's default multi-symbol sample."""
     return args.symbols or DEFAULT_SYMBOLS
 
 
 def _run(name: str, fn: ToolFn) -> None:
+    """Run one tool wrapper and print either its result or raised exception."""
     try:
         _print_result(name, fn())
     except Exception as exc:  # noqa: BLE001
@@ -72,6 +77,7 @@ def _run(name: str, fn: ToolFn) -> None:
 
 
 def _chart_params(args: argparse.Namespace) -> str:
+    """Build default chart params unless the caller supplied raw JSON."""
     if args.chart_params:
         return args.chart_params
 
@@ -188,6 +194,7 @@ def run_watchlist(args: argparse.Namespace) -> None:
 
 
 def run_scan(args: argparse.Namespace) -> None:
+    """Run scan without ticker overrides unless --symbols was provided."""
     tickers = json.dumps(args.symbols) if args.symbols else None
     _run("run_scan", lambda: server.run_scan(tickers=tickers))
 
@@ -207,6 +214,7 @@ def run_all(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create the local smoke-test CLI parser."""
     parser = argparse.ArgumentParser(description="Local scanner-mcp tool smoke tests")
     parser.add_argument(
         "--tool",
@@ -272,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Dispatch the selected local smoke-test command."""
     args = build_parser().parse_args()
     runners: dict[str, Callable[[argparse.Namespace], None]] = {
         "all": run_all,
