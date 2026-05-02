@@ -92,7 +92,7 @@ Tests that modify the local SQLite database are opt-in:
 
 ```bash
 python3 test.py --tool watchlist --mutate --symbols AAPL MSFT
-python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT AMZN META VST BTC HOOD BE LITE SOFI COIN MSTR PLTR TSM MU NVDA AMD PLTR NFLX PATH
+python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT AMZN META VST BTC HOOD BE LITE SOFI COIN MSTR PLTR TSM MU NVDA AMD PLTR NFLX PATH ZETA NOW CEG UUUU MA RDDT SNDK CLS IREN APLD NBIS CRWV ASTS RKLB ORCL
 python3 test.py --tool scan
 python3 test.py --tool scan --symbols AAPL MSFT
 python3 test.py --tool delete_signal --mutate --signal-id 1
@@ -101,7 +101,12 @@ python3 test.py --tool delete_signal --mutate --signal-id 1
 By default, `scan` does not pass a ticker override. It lets each persisted signal use its own `ticker_overrides`, or the global watchlist when a signal has no overrides. Add `--symbols` only when you want to override the scan tickers for the test run.
 
 ## Testing MCP server locally
-Use the
+
+Use the official MCP inspector tool for visual debugging:
+
+```bash
+npx @modelcontextprotocol/inspector scanner-mcp
+```
 
 ## Resources
 
