@@ -12,3 +12,5 @@ build/
 htmlcov/
 ~/.scanner_mcp/
 docs/
+output/
+.DS_Store

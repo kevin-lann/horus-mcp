@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 import io
 import logging
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -17,12 +20,27 @@ from scanner_mcp.indicators.core import Indicators
 
 log = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_OUTPUT_DIR = _PROJECT_ROOT / "output"
 
-def _fig_to_b64(fig: go.Figure) -> str:
+
+def _save_debug_png(chart_type: str, png_bytes: bytes) -> None:
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    filename = f"{chart_type}_{timestamp}_{uuid4().hex[:8]}.png"
+    (_OUTPUT_DIR / filename).write_bytes(png_bytes)
+
+
+def _fig_to_b64(fig: go.Figure, chart_type: str) -> str:
     buf = io.BytesIO()
     fig.write_image(buf, format="png", engine="kaleido", scale=1.5)
     buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    png_bytes = buf.getvalue()
+    try:
+        _save_debug_png(chart_type, png_bytes)
+    except OSError:
+        log.exception("Failed to save debug chart image")
+    return base64.b64encode(png_bytes).decode("ascii")
 
 
 def generate_chart(
@@ -65,7 +83,7 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         ]
     )
     fig.update_layout(title=f"{sym} {period} {interval}", xaxis_title="Date", yaxis_title="Price")
-    return {"mime": "image/png", "data": _fig_to_b64(fig)}
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
 
 def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
@@ -85,7 +103,7 @@ def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         xaxis_title="Date",
         yaxis_title="Y",
     )
-    return {"mime": "image/png", "data": _fig_to_b64(fig)}
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "price_overlay")}
 
 
 def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
@@ -94,7 +112,7 @@ def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dic
 
     sym = str(p.get("symbol", "SPY"))
     event = str(p.get("event_type", "rsi_oversold"))
-    windows = p.get("windows") or [7, 30, 90]
+    windows = p.get("windows") or [7, 30, 90, 180]
     res = compute_event_forward_returns(provider, sym, event, [int(x) for x in windows], period="10y")
     w_int = [int(x) for x in windows]
     if not res or not any(res.get(ww, []) for ww in w_int):
@@ -110,7 +128,7 @@ def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dic
         if rets:
             fig.add_trace(go.Histogram(x=rets, name=f"{w}d", nbinsx=30), row=i + 1, col=1)
     fig.update_layout(title=f"Forward returns after {event} — {sym}", showlegend=False)
-    return {"mime": "image/png", "data": _fig_to_b64(fig)}
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "forward_returns")}
 
 
 def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
@@ -126,7 +144,7 @@ def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
         dd = (c - run_max) / run_max * 100.0
         fig.add_trace(go.Scatter(x=df.index, y=dd, name=str(s), mode="lines"))
     fig.update_layout(title="Drawdown % (from running max)", yaxis_title="Drawdown %")
-    return {"mime": "image/png", "data": _fig_to_b64(fig)}
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "drawdown_comparison")}
 
 
 def _log_cycle(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
@@ -139,4 +157,4 @@ def _log_cycle(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
     y = np.log10(c.replace(0, np.nan))
     fig = go.Figure(data=[go.Scatter(x=df.index, y=y, name=sym, mode="lines")])
     fig.update_layout(title=f"{sym} log10(close) weekly", yaxis_title="log10 price")
-    return {"mime": "image/png", "data": _fig_to_b64(fig)}
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "log_cycle")}

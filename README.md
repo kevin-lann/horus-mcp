@@ -25,7 +25,7 @@ The default transport is **stdio**. Other MCP clients should run the same `scann
 
 **Env**
 
-- `SCANNER_MCP_DB` — SQLite file path
+- `SCANNER_MCP_DB` — SQLite file path (overrides default)
 - `SCAN_TIME` — daily scan time `HH:MM` Eastern (default `16:30`)
 - `LOG_LEVEL` — default `INFO`
 
@@ -61,6 +61,44 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 - Signals: `list_signal_catalog`, `create_signal`, `list_signals`, `delete_signal`, `run_scan`
 - Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (symbols as JSON list strings for portability)
 - Charts: `generate_chart` with `params` JSON — types: `price_history`, `price_overlay`, `forward_returns`, `drawdown_comparison`, `log_cycle`
+
+## Local tool testing
+
+Use `test.py` to smoke-test tools directly from the repo without starting an MCP client. Run it from the project root after setup:
+
+```bash
+source .venv/bin/activate
+python3 test.py --help
+```
+
+Examples:
+
+```bash
+python3 test.py --tool catalog
+python3 test.py --tool price --symbol SPY
+python3 test.py --tool indicators --symbol AAPL --period 6mo
+python3 test.py --tool options --symbol AAPL
+python3 test.py --tool snapshot
+python3 test.py --tool movers --exchange NASDAQ --limit 5
+python3 test.py --tool signals
+python3 test.py --tool chart --chart-type price_history --symbol SPY
+python3 test.py --tool chart --chart-type price_overlay --symbols SPY QQQ --period 6mo
+python3 test.py --tool all --symbol SPY
+```
+
+Chart tests print a compact base64 summary and save debug PNGs to `output/`.
+
+Tests that modify the local SQLite database are opt-in:
+
+```bash
+python3 test.py --tool watchlist --mutate --symbols AAPL MSFT
+python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT AMZN META VST BTC HOOD BE LITE SOFI COIN MSTR PLTR TSM MU NVDA AMD PLTR NFLX PATH
+python3 test.py --tool scan
+python3 test.py --tool scan --symbols AAPL MSFT
+python3 test.py --tool delete_signal --mutate --signal-id 1
+```
+
+By default, `scan` does not pass a ticker override. It lets each persisted signal use its own `ticker_overrides`, or the global watchlist when a signal has no overrides. Add `--symbols` only when you want to override the scan tickers for the test run.
 
 ## Resources
 
