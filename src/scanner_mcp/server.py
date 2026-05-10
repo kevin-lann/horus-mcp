@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import signal
 from contextlib import asynccontextmanager
 from io import StringIO
-from typing import Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Literal
+
+from pydantic import Field
+
+from scanner_mcp.mcp_schemas import YFINANCE_PERIOD_DESC
 
 from apscheduler.schedulers.base import BaseScheduler
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 
 from scanner_mcp.charts import generator as chartgen
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
@@ -32,7 +38,6 @@ _store: Store | None = None
 _provider: YFinanceProvider | None = None
 _sched: BaseScheduler | None = None
 
-_SCOPE_VALUES = frozenset({"tickers", "watchlist", "exchange"})
 _EXCHANGES = frozenset({"NYSE", "NASDAQ", "AMEX", "CRYPTO"})
 
 MARKET_SNAPSHOT: dict[str, list[str]] = {
@@ -270,9 +275,27 @@ def _quote_snapshot(p: YFinanceProvider, symbol: str) -> dict[str, Any]:
     return {"last_price": last, "previous_close": prev, "day_change_pct": chg_pct}
 
 
+def _chart_tool_result(chart_type: str, params: dict[str, Any]) -> Image | str:
+    """Run chart generation: MCP image block on success, JSON text with `error` on failure."""
+    pr = _get_provider()
+    try:
+        r = chartgen.generate_chart(pr, chart_type, params)
+        if not isinstance(r, dict):
+            return json.dumps({"error": "unexpected chart response"})
+        b64 = r.get("data")
+        if not isinstance(b64, str):
+            return json.dumps({"error": "chart response missing image data"})
+        return Image(data=base64.b64decode(b64))
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"error": str(e)})
+
+
 @mcp.tool()
 def debug_quote(symbol: str) -> str:
-    """Debug yfinance quote fields and history fallback for one symbol."""
+    """Debug yfinance `fast_info` keys and daily-history fallback for one symbol.
+
+    `symbol`: yfinance ticker (e.g. `AAPL`, `^GSPC`, `BTC-USD`).
+    """
     p = _get_provider()
     f = p.get_fast_info(symbol) or {}
     df = p.get_history(symbol, period="10d", interval="1d")
@@ -317,7 +340,10 @@ def debug_quote(symbol: str) -> str:
 
 @mcp.tool()
 def get_price(symbol: str) -> str:
-    """Current / last price, day change, volume, and market cap from yfinance fast_info."""
+    """Current / last price, day change, volume, and market cap from yfinance `fast_info` (with history fallback).
+
+    `symbol`: yfinance ticker string (e.g. `AAPL`, `^VIX`, `BTC-USD`).
+    """
     p = _get_provider()
     f = p.get_fast_info(symbol)
     q = _quote_snapshot(p, symbol)
@@ -347,14 +373,23 @@ def get_indicators(
     indicators: list[str],
     period: str = "6mo",
 ) -> str:
-    """Compute indicators with buy/hold/sell rating each plus consensus. Names: rsi, rsi:14, macd, bbands, sma:50, ema:20, ath_distance, beta."""
+    """Compute indicators with buy/hold/sell rating each plus consensus.
+
+    `symbol`: yfinance ticker.
+    `indicators`: each element is one token — `rsi` or `rsi:<n>` (length `n`, default 14); `macd`;
+    `bbands`; `sma` or `sma:<n>` (default 50); `ema` or `ema:<n>` (default 20); `ath_distance`; `beta`.
+    `period`: yfinance history window for daily bars (`1d` interval), e.g. `1mo`, `6mo`, `1y`, `5y`, `max` (default `6mo`).
+    """
     r = _compute_indicators(symbol, indicators, period)
     return json.dumps(r, indent=2, default=str)
 
 
 @mcp.tool()
 def get_ath_distance(symbol: str) -> str:
-    """Percent distance of last close from all-time high (over visible history)."""
+    """Percent distance of last daily close below the running all-time high (full `max` history window).
+
+    `symbol`: yfinance ticker.
+    """
     pr = _get_provider()
     df = pr.get_history(symbol, period="max", interval="1d")
     if df.empty:
@@ -366,7 +401,11 @@ def get_ath_distance(symbol: str) -> str:
 
 @mcp.tool()
 def get_option_chain(symbol: str, expiry: str | None = None) -> str:
-    """Options chain: calls and puts table as text (use expiry YYYY-MM-DD or first listed)."""
+    """Options chain preview as plain text (up to ~20 rows per calls/puts).
+
+    `symbol`: underlying yfinance ticker.
+    `expiry`: `YYYY-MM-DD` for a specific expiry, or omit / null to use the first listed expiry.
+    """
     p = _get_provider()
     r = p.get_option_chain(symbol, expiry)
     if r.get("error"):
@@ -386,7 +425,10 @@ def get_option_chain(symbol: str, expiry: str | None = None) -> str:
 
 @mcp.tool()
 def market_snapshot() -> str:
-    """Major US indices, ETFs, crypto, VIX: price and day % change."""
+    """Major US indices, ETFs, crypto, VIX: `last_price` and `day_change_pct` per symbol (no arguments).
+
+    Buckets: `us_indices`, `etfs`, `crypto`, `volatility` (fixed symbol lists in server config).
+    """
     p = _get_provider()
     out: dict[str, Any] = {}
     for cat, tickers in MARKET_SNAPSHOT.items():
@@ -405,7 +447,11 @@ def market_snapshot() -> str:
 
 @mcp.tool()
 def top_gainers(exchange: str, limit: int = 20) -> str:
-    """Top daily gainers for exchange: NYSE, NASDAQ, AMEX, or CRYPTO."""
+    """Top daily percentage gainers for an equity exchange or a fixed crypto pair list.
+
+    `exchange`: `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO` (case-insensitive; `CRYPTO` ranks ~20 liquid USD pairs).
+    `limit`: max rows (default 20).
+    """
     try:
         rows = screen_movers("gainers", exchange, limit=limit)
         return json.dumps(rows, default=str, indent=2)
@@ -415,7 +461,7 @@ def top_gainers(exchange: str, limit: int = 20) -> str:
 
 @mcp.tool()
 def top_losers(exchange: str, limit: int = 20) -> str:
-    """Top daily losers for exchange: NYSE, NASDAQ, AMEX, or CRYPTO."""
+    """Top daily percentage losers; same `exchange` and `limit` semantics as `top_gainers`."""
     try:
         rows = screen_movers("losers", exchange, limit=limit)
         return json.dumps(rows, default=str, indent=2)
@@ -425,7 +471,7 @@ def top_losers(exchange: str, limit: int = 20) -> str:
 
 @mcp.tool()
 def list_signal_catalog() -> str:
-    """List predefined signal types and default parameters."""
+    """List predefined `signal_type` keys with descriptions and `default_params` (input for `create_signal`)."""
     return json.dumps(list_catalog_entries(), indent=2, default=str)
 
 
@@ -433,56 +479,47 @@ def list_signal_catalog() -> str:
 def create_signal(
     name: str,
     signal_type: str,
-    params: str = "{}",
-    ticker_scope: str = "watchlist",
-    ticker_overrides: str | None = None,
+    params: dict[str, Any] | None = None,
+    ticker_scope: Literal["tickers", "watchlist", "exchange"] = "watchlist",
+    ticker_overrides: list[str] | None = None,
     exchange: str | None = None,
 ) -> str:
-    """Create a persisted enabled signal.
+    """Create a persisted enabled signal row.
 
-    `params` must be a JSON object merged with catalog defaults.
-    `ticker_scope`: `tickers` (use `ticker_overrides` JSON list), `watchlist`
-    (global watchlist), or `exchange` (set `exchange` to NYSE, NASDAQ, AMEX, or CRYPTO).
+    `name`: human-readable label (not necessarily unique).
+    `signal_type`: must match a catalog key from `list_signal_catalog`.
+    `params`: overrides merged on top of that type's catalog defaults (JSON object; use numbers not strings).
+    `ticker_scope`: `watchlist` (scan the global watchlist; omit `ticker_overrides` and `exchange`),
+    `tickers` (set non-empty `ticker_overrides`; omit `exchange`), or `exchange` (set `exchange`; omit overrides).
+    `ticker_overrides`: required when scope is `tickers` — list of ticker strings.
+    `exchange`: when scope is `exchange`, exactly `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO` (omit otherwise).
     """
     if signal_type not in CATALOG:
         return json.dumps({"error": f"invalid signal_type: {signal_type}"})
-    scope = (ticker_scope or "watchlist").strip().lower()
-    if scope not in _SCOPE_VALUES:
-        return json.dumps(
-            {"error": f"invalid ticker_scope: {ticker_scope!r}; use tickers, watchlist, or exchange"}
-        )
-    try:
-        pdct = json.loads(params) if params else {}
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": f"params JSON: {e}"})
+    scope = ticker_scope
+    pdct = dict(params) if params else {}
     merge_params(signal_type, pdct)  # validate
 
     ex_norm: str | None = exchange.strip().upper() if exchange and exchange.strip() else None
     ov: list[str] | None = None
 
     if scope == "tickers":
-        if not ticker_overrides or not ticker_overrides.strip():
-            return json.dumps({"error": "ticker_scope=tickers requires non-empty ticker_overrides JSON list"})
+        if not ticker_overrides:
+            return json.dumps({"error": "ticker_scope=tickers requires non-empty ticker_overrides list"})
         if ex_norm:
             return json.dumps({"error": "exchange must be omitted when ticker_scope is tickers"})
-        try:
-            o = json.loads(ticker_overrides)
-        except json.JSONDecodeError as e:
-            return json.dumps({"error": f"ticker_overrides: {e}"})
-        if not isinstance(o, list):
-            return json.dumps({"error": "ticker_overrides must be a JSON array of strings"})
-        ov = [str(x).upper() for x in o if str(x).strip()]
+        ov = [str(x).upper() for x in ticker_overrides if str(x).strip()]
         if not ov:
             return json.dumps({"error": "ticker_overrides list is empty"})
 
     elif scope == "watchlist":
-        if ticker_overrides and ticker_overrides.strip():
+        if ticker_overrides:
             return json.dumps({"error": "omit ticker_overrides when ticker_scope is watchlist"})
         if ex_norm:
             return json.dumps({"error": "omit exchange when ticker_scope is watchlist"})
 
     else:  # exchange
-        if ticker_overrides and ticker_overrides.strip():
+        if ticker_overrides:
             return json.dumps({"error": "omit ticker_overrides when ticker_scope is exchange"})
         if not ex_norm:
             return json.dumps({"error": "ticker_scope=exchange requires exchange (NYSE, NASDAQ, AMEX, or CRYPTO)"})
@@ -503,7 +540,7 @@ def create_signal(
 
 @mcp.tool()
 def list_signals() -> str:
-    """List configured signals."""
+    """List configured signals (includes `id` for `delete_signal` / `run_scan`)."""
     rows = _get_store().signal_list()
     out = [
         {
@@ -523,7 +560,7 @@ def list_signals() -> str:
 
 @mcp.tool()
 def delete_signal(signal_id: int) -> str:
-    """Delete a signal and its alert history."""
+    """Delete a signal and its alert history. `signal_id` is the integer `id` from `list_signals`."""
     ok = _get_store().signal_delete(signal_id)
     return json.dumps({"ok": ok})
 
@@ -531,43 +568,34 @@ def delete_signal(signal_id: int) -> str:
 @mcp.tool()
 def run_scan(
     signal_id: int | None = None,
-    tickers: str | None = None,
+    tickers: list[str] | None = None,
     all_signal_types: bool = False,
     symbol: str | None = None,
     exchange: str | None = None,
 ) -> str:
-    """Run an on-demand scan and return only triggered results.
+    """Run an on-demand scan and return only triggered rows.
 
-    When `tickers`, `symbol`, and `exchange` are all omitted, each signal uses
-    its configured scope (specific tickers, global watchlist, or full exchange).
-    Pass `exchange` (NYSE, NASDAQ, AMEX, CRYPTO) to scan every symbol listed for
-    that venue via Yahoo's screener. When `signal_id` is set, only that enabled
-    signal is evaluated. Set `all_signal_types` with `symbol`, `tickers`, or
-    `exchange` to evaluate every catalog signal type on that universe.
+    Universe — pass **at most one** of:
+    - omit `symbol`, `tickers`, and `exchange`: each enabled signal uses its saved scope / overrides / exchange;
+    - `symbol`: single ticker string (e.g. `NVDA`);
+    - `tickers`: list of ticker strings;
+    - `exchange`: `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO` (full Yahoo screener list for equities; fixed crypto list for `CRYPTO`).
+
+    `signal_id`: optional; when set, only that **enabled** signal runs (ignored when `all_signal_types` is true).
+    `all_signal_types`: when true together with exactly one universe selector above, run **every** catalog
+    signal type against that universe (`signal_id` must be omitted); uses 1 year of daily bars per symbol.
     """
     pr = _get_provider()
     tick_list: list[str] | None = None
     has_sym = bool(symbol and symbol.strip())
-    has_tix = bool(tickers and tickers.strip())
+    has_tix = tickers is not None
     has_ex = bool(exchange and exchange.strip())
     if sum(1 for x in (has_sym, has_tix, has_ex) if x) > 1:
         return json.dumps({"error": "pass at most one of symbol, tickers, or exchange"})
     if symbol:
         tick_list = [symbol.strip().upper()]
-    if tickers:
-        try:
-            t = json.loads(tickers)
-            if isinstance(t, list):
-                tick_list = [str(x).upper() for x in t if str(x).strip()]
-            else:
-                return json.dumps({"error": "tickers must be a JSON array of strings"})
-        except json.JSONDecodeError as e:
-            return json.dumps(
-                {
-                    "error": f"tickers JSON: {e}",
-                    "hint": "Use valid JSON with double quotes, e.g. [\"AAPL\", \"MSFT\"].",
-                }
-            )
+    if tickers is not None:
+        tick_list = [str(x).upper() for x in tickers if str(x).strip()]
     if exchange:
         exu = exchange.strip().upper()
         if exu not in _EXCHANGES:
@@ -680,59 +708,91 @@ def run_scan(
 
 
 @mcp.tool()
-def add_to_watchlist(symbols: str) -> str:
-    """Add symbols. Pass JSON list e.g. [\"AAPL\",\"MSFT\"]."""
-    try:
-        arr = json.loads(symbols)
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": str(e)})
-    if not isinstance(arr, list):
-        return json.dumps({"error": "expected JSON array of strings"})
-    a = [str(x) for x in arr]
-    added = _get_store().watchlist_add(a)
+def add_to_watchlist(symbols: list[str]) -> str:
+    """`add_to_watchlist`: append ticker strings supplied in `symbols` to the global watchlist.
+
+    `symbols` is a native Python list of tickers (`list[str]`); under MCP structured tool calls this is encoded as a JSON array.
+    Returns JSON text: `{"added": [...]}` where `added` lists tickers inserted in this invocation (symbols already stored are omitted).
+    """
+    added = _get_store().watchlist_add([str(x) for x in symbols])
     return json.dumps({"added": added})
 
 
 @mcp.tool()
-def remove_from_watchlist(symbols: str) -> str:
-    """Remove tickers. JSON list."""
-    try:
-        arr = json.loads(symbols)
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": str(e)})
-    n = _get_store().watchlist_remove([str(x) for x in arr])
+def remove_from_watchlist(symbols: list[str]) -> str:
+    """Remove symbols from the watchlist (`symbols`: array of tickers)."""
+    n = _get_store().watchlist_remove([str(x) for x in symbols])
     return json.dumps({"removed": n})
 
 
 @mcp.tool()
 def get_watchlist() -> str:
-    """Current watchlist tickers."""
+    """Return the current watchlist as a JSON array of ticker strings."""
     w = [x.symbol for x in _get_store().watchlist_get()]
     return json.dumps(w, indent=2)
 
 
 @mcp.tool()
-def generate_chart(
-    chart_type: str,
-    params: str = "{}",
-) -> str:
-    """Build a chart and return JSON containing image/png base64 data.
+def chart_price_history(
+    symbol: str = "SPY",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+    interval: Annotated[str, Field(description="yfinance bar size (e.g. 1d, 1h); intraday couples to allowed period ranges")] = "1d",
+) -> Image | str:
+    """Candlestick price history chart. Returns PNG image; on failure JSON text with `error`."""
+    return _chart_tool_result(
+        "price_history",
+        {"symbol": symbol, "period": period, "interval": interval},
+    )
 
-    `params` is a JSON object string. Supported types are `price_history`,
-    `price_overlay`, `forward_returns`, `drawdown_comparison`, and `log_cycle`.
+
+@mcp.tool()
+def chart_price_overlay(
+    symbols: list[str] | None = None,
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+    normalize: bool = True,
+) -> Image | str:
+    """Multi-symbol line overlay (default symbols SPY and QQQ if `symbols` omitted). Normalized to 100 when `normalize`."""
+    p: dict[str, Any] = {"period": period, "normalize": normalize}
+    if symbols is not None:
+        p["symbols"] = symbols
+    return _chart_tool_result("price_overlay", p)
+
+
+@mcp.tool()
+def chart_forward_returns(
+    symbol: str = "SPY",
+    event_type: Literal["rsi_oversold", "rsi_overbought"] = "rsi_oversold",
+    windows: list[int] | None = None,
+) -> Image | str:
+    """Histograms of forward returns after RSI events (~10y daily history; `period` not configurable).
+
+    `windows`: forward horizons in **days** along the daily close series (default 7, 30, 90, 180).
     """
-    pr = _get_provider()
-    try:
-        p = json.loads(params) if params else {}
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": f"params: {e}"})
-    if not isinstance(p, dict):
-        return json.dumps({"error": "params must be a JSON object"})
-    try:
-        r = chartgen.generate_chart(pr, chart_type, p)
-        return json.dumps(r)
-    except Exception as e:  # noqa: BLE001
-        return json.dumps({"error": str(e)})
+    p: dict[str, Any] = {"symbol": symbol, "event_type": event_type}
+    if windows is not None:
+        p["windows"] = windows
+    return _chart_tool_result("forward_returns", p)
+
+
+@mcp.tool()
+def chart_drawdown_comparison(
+    symbols: list[str] | None = None,
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "5y",
+) -> Image | str:
+    """Underwater (drawdown %) chart vs running high. Default symbols: ^GSPC and QQQ."""
+    p: dict[str, Any] = {"period": period}
+    if symbols is not None:
+        p["symbols"] = symbols
+    return _chart_tool_result("drawdown_comparison", p)
+
+
+@mcp.tool()
+def chart_log_cycle(
+    symbol: str = "BTC-USD",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "max",
+) -> Image | str:
+    """Weekly log10(close) line chart for long-horizon inspection."""
+    return _chart_tool_result("log_cycle", {"symbol": symbol, "period": period})
 
 
 @mcp.resource("signals://triggered", mime_type="application/json")
@@ -760,7 +820,10 @@ def resource_watchlist() -> str:
 
 @mcp.resource("research://forward-returns/{symbol}/{event_type}", mime_type="text/markdown")
 def resource_forward_returns(symbol: str, event_type: str) -> str:
-    """Markdown table of mean/median forward returns (7/30/90d) after RSI events."""
+    """Markdown summary of mean/median forward returns (7/30/90 trading days) after RSI events.
+
+    URI path `symbol`: yfinance ticker. `event_type`: `rsi_oversold` or `rsi_overbought` (same as `chart_forward_returns`).
+    """
     return forward_returns_markdown(_get_provider(), symbol, event_type)
 
 

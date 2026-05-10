@@ -25,10 +25,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from fastmcp.utilities.types import Image  # noqa: E402
 from scanner_mcp import server  # noqa: E402
 
 
-ToolFn = Callable[[], str]
+ToolFn = Callable[[], Any]
 DEFAULT_SYMBOLS = ["SPY", "QQQ"]
 
 
@@ -51,9 +52,16 @@ def _compact_chart_payload(payload: Any) -> Any:
     return payload
 
 
-def _print_result(name: str, raw: str) -> None:
+def _print_result(name: str, raw: Any) -> None:
     """Pretty-print a tool response in a consistent local-test format."""
     print(f"\n=== {name} ===")
+    if isinstance(raw, Image):
+        sz = len(raw.data) if raw.data is not None else 0
+        print(json.dumps({"type": "image/png", "bytes": sz}, indent=2))
+        return
+    if not isinstance(raw, str):
+        print(str(raw)[:4000])
+        return
     parsed = _parse_jsonish(raw)
     parsed = _compact_chart_payload(parsed)
     if isinstance(parsed, (dict, list)):
@@ -76,37 +84,43 @@ def _run(name: str, fn: ToolFn) -> None:
         print(f"ERROR: {exc}")
 
 
-def _chart_params(args: argparse.Namespace) -> str:
-    """Build default chart params unless the caller supplied raw JSON."""
-    if args.chart_params:
-        return args.chart_params
-
-    defaults: dict[str, dict[str, Any]] = {
-        "price_history": {
+def _chart_tool_call(args: argparse.Namespace) -> Image | str:
+    """Dispatch to typed chart tools; optional --chart-params merges JSON overrides into defaults."""
+    ct = args.chart_type
+    if ct == "price_history":
+        kw: dict[str, Any] = {
             "symbol": args.symbol,
             "period": args.period,
             "interval": args.interval,
-        },
-        "price_overlay": {
-            "symbols": _symbols(args),
-            "period": args.period,
-            "normalize": True,
-        },
-        "forward_returns": {
+        }
+        if args.chart_params:
+            kw.update(json.loads(args.chart_params))
+        return server.chart_price_history(**kw)
+    if ct == "price_overlay":
+        kw = {"symbols": _symbols(args), "period": args.period, "normalize": True}
+        if args.chart_params:
+            kw.update(json.loads(args.chart_params))
+        return server.chart_price_overlay(**kw)
+    if ct == "forward_returns":
+        kw = {
             "symbol": args.symbol,
             "event_type": "rsi_oversold",
             "windows": [7, 30, 90],
-        },
-        "drawdown_comparison": {
-            "symbols": _symbols(args),
-            "period": args.period,
-        },
-        "log_cycle": {
-            "symbol": "BTC-USD",
-            "period": "max",
-        },
-    }
-    return json.dumps(defaults[args.chart_type])
+        }
+        if args.chart_params:
+            kw.update(json.loads(args.chart_params))
+        return server.chart_forward_returns(**kw)
+    if ct == "drawdown_comparison":
+        kw = {"symbols": _symbols(args), "period": args.period}
+        if args.chart_params:
+            kw.update(json.loads(args.chart_params))
+        return server.chart_drawdown_comparison(**kw)
+    if ct == "log_cycle":
+        kw = {"symbol": "BTC-USD", "period": "max"}
+        if args.chart_params:
+            kw.update(json.loads(args.chart_params))
+        return server.chart_log_cycle(**kw)
+    raise ValueError(f"unknown chart_type: {ct}")
 
 
 def run_price(args: argparse.Namespace) -> None:
@@ -162,7 +176,7 @@ def run_create_signal(args: argparse.Namespace) -> None:
         return
     if args.signal_tickers:
         ticker_scope = "tickers"
-        ticker_overrides = json.dumps(_symbols(args))
+        ticker_overrides = _symbols(args)
         sig_exchange = None
     elif args.signal_exchange:
         ticker_scope = "exchange"
@@ -172,12 +186,19 @@ def run_create_signal(args: argparse.Namespace) -> None:
         ticker_scope = "watchlist"
         ticker_overrides = None
         sig_exchange = None
+    raw_params = args.signal_params.strip()
+    sig_params_obj: dict[str, Any] | None
+    try:
+        sig_params_obj = json.loads(raw_params) if raw_params else {}
+    except json.JSONDecodeError as exc:
+        print(f"\nInvalid --signal-params JSON: {exc}")
+        return
     _run(
         "create_signal",
         lambda: server.create_signal(
             args.signal_name,
             args.signal_type,
-            args.signal_params,
+            sig_params_obj,
             ticker_scope=ticker_scope,
             ticker_overrides=ticker_overrides,
             exchange=sig_exchange,
@@ -203,28 +224,26 @@ def run_watchlist(args: argparse.Namespace) -> None:
     if not args.mutate:
         print("\nPass --mutate to also test add_to_watchlist/remove_from_watchlist.")
         return
-    symbols = json.dumps(_symbols(args))
-    _run("add_to_watchlist", lambda: server.add_to_watchlist(symbols))
+    syms = _symbols(args)
+    _run("add_to_watchlist", lambda: server.add_to_watchlist(syms))
     _run("get_watchlist", server.get_watchlist)
-    _run("remove_from_watchlist", lambda: server.remove_from_watchlist(symbols))
+    _run("remove_from_watchlist", lambda: server.remove_from_watchlist(syms))
 
 
 def run_scan(args: argparse.Namespace) -> None:
     """Run scan without ticker overrides unless --symbols or --scan-exchange was provided."""
-    tickers = json.dumps(args.symbols) if args.symbols else None
     ex = args.scan_exchange
     _run(
         "run_scan",
         lambda: server.run_scan(
-            tickers=tickers,
+            tickers=args.symbols,
             exchange=ex,
         ),
     )
 
 
 def run_chart(args: argparse.Namespace) -> None:
-    params = _chart_params(args)
-    _run("generate_chart", lambda: server.generate_chart(args.chart_type, params))
+    _run(args.chart_type, lambda: _chart_tool_call(args))
     print(f"\nDebug PNGs are written to: {ROOT / 'output'}")
 
 
@@ -308,7 +327,11 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         default="price_history",
     )
-    parser.add_argument("--chart-params", default=None, help="Raw JSON string for generate_chart params")
+    parser.add_argument(
+        "--chart-params",
+        default=None,
+        help="Optional JSON object merged into defaults for the selected --chart-type",
+    )
     parser.add_argument("--mutate", action="store_true", help="Allow tests that modify the local SQLite DB")
     return parser
 
