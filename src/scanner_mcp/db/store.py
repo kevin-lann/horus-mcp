@@ -100,30 +100,29 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts (triggered_at DESC);
                 """
             )
-            self._migrate_signals_columns()
+            self._migrate_signals_columns(c)
 
-    def _migrate_signals_columns(self) -> None:
+    def _migrate_signals_columns(self, conn: sqlite3.Connection) -> None:
         """Add ticker_scope / exchange and backfill from legacy ticker_overrides."""
-        with self._conn() as c:
-            cols = {str(r[1]) for r in c.execute("PRAGMA table_info(signals)")}
-            if "ticker_scope" not in cols:
-                c.execute(
-                    "ALTER TABLE signals ADD COLUMN ticker_scope TEXT NOT NULL DEFAULT 'watchlist'",
-                )
-                c.execute("ALTER TABLE signals ADD COLUMN exchange TEXT")
-                for row in c.execute("SELECT id, ticker_overrides FROM signals").fetchall():
-                    rid = int(row[0])
-                    ov = row[1]
-                    if ov:
-                        c.execute(
-                            "UPDATE signals SET ticker_scope = 'tickers' WHERE id = ?",
-                            (rid,),
-                        )
-                    else:
-                        c.execute(
-                            "UPDATE signals SET ticker_scope = 'watchlist' WHERE id = ?",
-                            (rid,),
-                        )
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(signals)")}
+        if "ticker_scope" not in cols:
+            conn.execute(
+                "ALTER TABLE signals ADD COLUMN ticker_scope TEXT NOT NULL DEFAULT 'watchlist'",
+            )
+            conn.execute("ALTER TABLE signals ADD COLUMN exchange TEXT")
+            for row in conn.execute("SELECT id, ticker_overrides FROM signals").fetchall():
+                rid = int(row[0])
+                ov = row[1]
+                if ov:
+                    conn.execute(
+                        "UPDATE signals SET ticker_scope = 'tickers' WHERE id = ?",
+                        (rid,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE signals SET ticker_scope = 'watchlist' WHERE id = ?",
+                        (rid,),
+                    )
 
     # watchlist
     def watchlist_add(self, symbols: Sequence[str]) -> list[str]:
