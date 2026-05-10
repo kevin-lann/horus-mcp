@@ -58,9 +58,9 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 ## Tools
 
 - Market: `get_price`, `get_indicators`, `get_ath_distance`, `get_option_chain`, `market_snapshot`, `top_gainers`, `top_losers`
-- Signals: `list_signal_catalog`, `create_signal`, `list_signals`, `delete_signal`, `run_scan`
-- Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (symbols as JSON list strings for portability)
-- Charts: `generate_chart` with `params` JSON — types: `price_history`, `price_overlay`, `forward_returns`, `drawdown_comparison`, `log_cycle`
+- Signals: `list_signal_catalog`, `create_signal` (`params`: JSON object; `ticker_overrides`: string array when scope=tickers), `list_signals`, `delete_signal`, `run_scan` (`tickers`: string array)
+- Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
+- Charts (typed MCP args; JSON `mime` + base64 PNG `data`): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle`
 
 ## Local tool testing
 
