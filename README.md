@@ -114,6 +114,26 @@ npx @modelcontextprotocol/inspector scanner-mcp
 - `signals://watchlist` — tickers (JSON)
 - `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought`)
 
+## Connecting to the SQLite DB
+
+Using CLI:
+```bash
+sqlite3 ~/.scanner_mcp/data.db
+```
+Useful once inside:
+
+- `.tables` — list tables (watchlist, signals, alerts).
+- `.schema alerts` — column layout.
+- `SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT 20;`
+- `SELECT * FROM signals;`
+- `SELECT * FROM watchlist;`
+- `.quit`
+
+One-shot from the shell:
+```bash
+sqlite3 ~/.scanner_mcp/data.db "SELECT id, signal_id, symbol, triggered_at FROM alerts ORDER BY triggered_at DESC LIMIT 10;"
+```
+
 ## Requirements
 
 - Python 3.11+

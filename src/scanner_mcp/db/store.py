@@ -26,6 +26,8 @@ class SignalRow:
     signal_type: str
     params: dict[str, Any]
     ticker_overrides: list[str] | None
+    ticker_scope: str
+    exchange: str | None
     enabled: bool
     created_at: str
 
@@ -82,6 +84,8 @@ class Store:
                     signal_type TEXT NOT NULL,
                     params TEXT NOT NULL,
                     ticker_overrides TEXT,
+                    ticker_scope TEXT NOT NULL DEFAULT 'watchlist',
+                    exchange TEXT,
                     enabled INTEGER DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -96,6 +100,30 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts (triggered_at DESC);
                 """
             )
+            self._migrate_signals_columns()
+
+    def _migrate_signals_columns(self) -> None:
+        """Add ticker_scope / exchange and backfill from legacy ticker_overrides."""
+        with self._conn() as c:
+            cols = {str(r[1]) for r in c.execute("PRAGMA table_info(signals)")}
+            if "ticker_scope" not in cols:
+                c.execute(
+                    "ALTER TABLE signals ADD COLUMN ticker_scope TEXT NOT NULL DEFAULT 'watchlist'",
+                )
+                c.execute("ALTER TABLE signals ADD COLUMN exchange TEXT")
+                for row in c.execute("SELECT id, ticker_overrides FROM signals").fetchall():
+                    rid = int(row[0])
+                    ov = row[1]
+                    if ov:
+                        c.execute(
+                            "UPDATE signals SET ticker_scope = 'tickers' WHERE id = ?",
+                            (rid,),
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE signals SET ticker_scope = 'watchlist' WHERE id = ?",
+                            (rid,),
+                        )
 
     # watchlist
     def watchlist_add(self, symbols: Sequence[str]) -> list[str]:
@@ -138,20 +166,27 @@ class Store:
         signal_type: str,
         params: dict[str, Any],
         ticker_overrides: list[str] | None,
+        ticker_scope: str = "watchlist",
+        exchange: str | None = None,
     ) -> int:
         """Persist an enabled signal and return its database ID."""
         now = _utc_now()
         with self._conn() as c:
             c.execute(
                 """
-                INSERT INTO signals (name, signal_type, params, ticker_overrides, enabled, created_at)
-                VALUES (?, ?, ?, ?, 1, ?)
+                INSERT INTO signals (
+                    name, signal_type, params, ticker_overrides,
+                    ticker_scope, exchange, enabled, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     name,
                     signal_type,
                     json.dumps(params),
                     json.dumps(ticker_overrides) if ticker_overrides is not None else None,
+                    ticker_scope,
+                    exchange.strip().upper() if exchange else None,
                     now,
                 ),
             )
@@ -211,12 +246,20 @@ class Store:
 def _row_to_signal(r: sqlite3.Row) -> SignalRow:
     """Convert a SQLite signal row into a typed dataclass."""
     ov = r["ticker_overrides"]
+    keys = r.keys()
+    scope = str(r["ticker_scope"]) if "ticker_scope" in keys else "watchlist"
+    ex = r["exchange"] if "exchange" in keys else None
+    ov_list = json.loads(ov) if ov else None
+    if "ticker_scope" not in keys:
+        scope = "tickers" if ov_list else "watchlist"
     return SignalRow(
         id=int(r["id"]),
         name=str(r["name"]),
         signal_type=str(r["signal_type"]),
         params=json.loads(r["params"]),
-        ticker_overrides=json.loads(ov) if ov else None,
+        ticker_overrides=ov_list,
+        ticker_scope=scope,
+        exchange=str(ex).strip().upper() if ex else None,
         enabled=bool(r["enabled"]),
         created_at=str(r["created_at"]),
     )

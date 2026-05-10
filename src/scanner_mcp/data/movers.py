@@ -19,7 +19,7 @@ _EXCHANGE_SETS: dict[Exchange, frozenset[str]] = {
 }
 
 # Major spot pairs to rank for CRYPTO mode
-_CRYPTO_TICKERS = [
+CRYPTO_TICKERS = _CRYPTO_TICKERS = [
     "BTC-USD",
     "ETH-USD",
     "SOL-USD",
