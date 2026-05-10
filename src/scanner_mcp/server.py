@@ -709,7 +709,11 @@ def run_scan(
 
 @mcp.tool()
 def add_to_watchlist(symbols: list[str]) -> str:
-    """Add symbols to the global watchlist. `symbols` is a JSON array of ticker strings."""
+    """`add_to_watchlist`: append ticker strings supplied in `symbols` to the global watchlist.
+
+    `symbols` is a native Python list of tickers (`list[str]`); under MCP structured tool calls this is encoded as a JSON array.
+    Returns JSON text: `{"added": [...]}` where `added` lists tickers inserted in this invocation (symbols already stored are omitted).
+    """
     added = _get_store().watchlist_add([str(x) for x in symbols])
     return json.dumps({"added": added})
 

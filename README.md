@@ -60,7 +60,7 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 - Market: `get_price`, `get_indicators`, `get_ath_distance`, `get_option_chain`, `market_snapshot`, `top_gainers`, `top_losers`
 - Signals: `list_signal_catalog`, `create_signal` (`params`: JSON object; `ticker_overrides`: string array when scope=tickers), `list_signals`, `delete_signal`, `run_scan` (`tickers`: string array)
 - Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
-- Charts (typed MCP args; JSON `mime` + base64 PNG `data`): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle`
+- Charts (typed args): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle` — each uses `_chart_tool_result`, which on success returns a FastMCP `Image` (`Image(data=base64.b64decode(...))`: raw PNG bytes wrapped for an MCP image block). On failure it returns JSON text with an `error` field.
 
 ## Local tool testing
 
