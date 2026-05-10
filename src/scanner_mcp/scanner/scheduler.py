@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
 
-import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
+from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
 from scanner_mcp.data.provider import YFinanceProvider
-from scanner_mcp.db.store import Store
+from scanner_mcp.db.store import SignalRow, Store
 from scanner_mcp.notify.notifier import notify_desktop
 from scanner_mcp.signals.evaluator import evaluate
 from scanner_mcp.signals.models import ActiveSignal
 
 log = logging.getLogger(__name__)
+
+
+def _tickers_for_signal(srow: SignalRow, watch: list[str]) -> list[str]:
+    if srow.ticker_scope == "tickers":
+        return list(srow.ticker_overrides or [])
+    if srow.ticker_scope == "exchange":
+        if not srow.exchange:
+            return []
+        try:
+            return fetch_exchange_tickers(srow.exchange)
+        except ValueError:
+            return []
+    return list(watch)
 
 
 def _scan_job(store: Store, provider: YFinanceProvider) -> None:
@@ -37,9 +49,10 @@ def run_full_scan(
 ) -> dict[str, Any]:
     """Evaluate all enabled signals and persist alerts for triggered results.
 
-    Each signal uses its `ticker_overrides` when present, otherwise the global
-    watchlist. The result counts every fetched symbol/signal pair checked and
-    includes only fired alerts in the `alerts` list.
+    Each signal uses `ticker_scope`: fixed tickers, global watchlist, or all
+    symbols on a configured US/crypto exchange (Yahoo screener). The result
+    counts every fetched symbol/signal pair checked and includes only fired
+    alerts in the `alerts` list.
     """
     result: dict[str, Any] = {"checked": 0, "fired": 0, "alerts": []}
     try:
@@ -50,9 +63,9 @@ def run_full_scan(
     watch = [w.symbol for w in store.watchlist_get()]
 
     for srow in sig_rows:
-        tickers = srow.ticker_overrides or watch
+        tickers = _tickers_for_signal(srow, watch)
         if not tickers:
-            log.debug("Signal %s has no tickers (empty watchlist and no overrides)", srow.id)
+            log.debug("Signal %s has no symbols to scan", srow.id)
             continue
         asig = ActiveSignal(
             id=srow.id,

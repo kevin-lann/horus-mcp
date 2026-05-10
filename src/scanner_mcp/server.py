@@ -14,9 +14,10 @@ from apscheduler.schedulers.base import BaseScheduler
 from fastmcp import FastMCP
 
 from scanner_mcp.charts import generator as chartgen
+from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
 from scanner_mcp.data.movers import screen_movers
 from scanner_mcp.data.provider import YFinanceProvider
-from scanner_mcp.db.store import Store
+from scanner_mcp.db.store import SignalRow, Store
 from scanner_mcp.indicators.core import Indicators, beta_from_returns
 from scanner_mcp.indicators import ratings
 from scanner_mcp.research.forward_returns import forward_returns_markdown
@@ -30,6 +31,9 @@ log = logging.getLogger(__name__)
 _store: Store | None = None
 _provider: YFinanceProvider | None = None
 _sched: BaseScheduler | None = None
+
+_SCOPE_VALUES = frozenset({"tickers", "watchlist", "exchange"})
+_EXCHANGES = frozenset({"NYSE", "NASDAQ", "AMEX", "CRYPTO"})
 
 MARKET_SNAPSHOT: dict[str, list[str]] = {
     "us_indices": ["^GSPC", "^IXIC", "^DJI", "^RUT"],
@@ -189,6 +193,21 @@ def _as_float(value: Any) -> float | None:
     if out != out:
         return None
     return out
+
+
+def _resolve_signal_universe(srow: SignalRow, watch: list[str]) -> list[str]:
+    """Tickers to scan for one persisted signal: overrides, watchlist, or full exchange list."""
+    scope = srow.ticker_scope
+    if scope == "tickers":
+        return list(srow.ticker_overrides or [])
+    if scope == "exchange":
+        if not srow.exchange:
+            return []
+        try:
+            return fetch_exchange_tickers(srow.exchange)
+        except ValueError:
+            return []
+    return list(watch)
 
 
 def _first_present(data: dict[str, Any], *keys: str) -> Any:
@@ -415,31 +434,71 @@ def create_signal(
     name: str,
     signal_type: str,
     params: str = "{}",
+    ticker_scope: str = "watchlist",
     ticker_overrides: str | None = None,
+    exchange: str | None = None,
 ) -> str:
     """Create a persisted enabled signal.
 
     `params` must be a JSON object merged with catalog defaults.
-    `ticker_overrides` may be a JSON list; when omitted, scans use the global
-    watchlist for this signal.
+    `ticker_scope`: `tickers` (use `ticker_overrides` JSON list), `watchlist`
+    (global watchlist), or `exchange` (set `exchange` to NYSE, NASDAQ, AMEX, or CRYPTO).
     """
     if signal_type not in CATALOG:
         return json.dumps({"error": f"invalid signal_type: {signal_type}"})
+    scope = (ticker_scope or "watchlist").strip().lower()
+    if scope not in _SCOPE_VALUES:
+        return json.dumps(
+            {"error": f"invalid ticker_scope: {ticker_scope!r}; use tickers, watchlist, or exchange"}
+        )
     try:
         pdct = json.loads(params) if params else {}
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"params JSON: {e}"})
     merge_params(signal_type, pdct)  # validate
+
+    ex_norm: str | None = exchange.strip().upper() if exchange and exchange.strip() else None
     ov: list[str] | None = None
-    if ticker_overrides:
+
+    if scope == "tickers":
+        if not ticker_overrides or not ticker_overrides.strip():
+            return json.dumps({"error": "ticker_scope=tickers requires non-empty ticker_overrides JSON list"})
+        if ex_norm:
+            return json.dumps({"error": "exchange must be omitted when ticker_scope is tickers"})
         try:
             o = json.loads(ticker_overrides)
-            if isinstance(o, list):
-                ov = [str(x).upper() for x in o]
         except json.JSONDecodeError as e:
             return json.dumps({"error": f"ticker_overrides: {e}"})
-    i = _get_store().signal_create(name, signal_type, pdct, ov)
-    return json.dumps({"id": i, "name": name, "signal_type": signal_type})
+        if not isinstance(o, list):
+            return json.dumps({"error": "ticker_overrides must be a JSON array of strings"})
+        ov = [str(x).upper() for x in o if str(x).strip()]
+        if not ov:
+            return json.dumps({"error": "ticker_overrides list is empty"})
+
+    elif scope == "watchlist":
+        if ticker_overrides and ticker_overrides.strip():
+            return json.dumps({"error": "omit ticker_overrides when ticker_scope is watchlist"})
+        if ex_norm:
+            return json.dumps({"error": "omit exchange when ticker_scope is watchlist"})
+
+    else:  # exchange
+        if ticker_overrides and ticker_overrides.strip():
+            return json.dumps({"error": "omit ticker_overrides when ticker_scope is exchange"})
+        if not ex_norm:
+            return json.dumps({"error": "ticker_scope=exchange requires exchange (NYSE, NASDAQ, AMEX, or CRYPTO)"})
+        if ex_norm not in _EXCHANGES:
+            return json.dumps({"error": f"invalid exchange: {exchange}; use NYSE, NASDAQ, AMEX, or CRYPTO"})
+
+    i = _get_store().signal_create(name, signal_type, pdct, ov, ticker_scope=scope, exchange=ex_norm)
+    return json.dumps(
+        {
+            "id": i,
+            "name": name,
+            "signal_type": signal_type,
+            "ticker_scope": scope,
+            "exchange": ex_norm,
+        }
+    )
 
 
 @mcp.tool()
@@ -452,7 +511,9 @@ def list_signals() -> str:
             "name": r.name,
             "signal_type": r.signal_type,
             "params": r.params,
+            "ticker_scope": r.ticker_scope,
             "ticker_overrides": r.ticker_overrides,
+            "exchange": r.exchange,
             "enabled": r.enabled,
         }
         for r in rows
@@ -473,20 +534,26 @@ def run_scan(
     tickers: str | None = None,
     all_signal_types: bool = False,
     symbol: str | None = None,
+    exchange: str | None = None,
 ) -> str:
     """Run an on-demand scan and return only triggered results.
 
-    When `tickers` is omitted, each signal uses its own ticker overrides or the
-    global watchlist. When `signal_id` is set, only that enabled signal is
-    evaluated. Set `all_signal_types` with `symbol` or `tickers` to evaluate
-    every catalog signal type and return the triggered matches.
+    When `tickers`, `symbol`, and `exchange` are all omitted, each signal uses
+    its configured scope (specific tickers, global watchlist, or full exchange).
+    Pass `exchange` (NYSE, NASDAQ, AMEX, CRYPTO) to scan every symbol listed for
+    that venue via Yahoo's screener. When `signal_id` is set, only that enabled
+    signal is evaluated. Set `all_signal_types` with `symbol`, `tickers`, or
+    `exchange` to evaluate every catalog signal type on that universe.
     """
     pr = _get_provider()
     tick_list: list[str] | None = None
-    if symbol and tickers:
-        return json.dumps({"error": "pass either symbol or tickers, not both"})
+    has_sym = bool(symbol and symbol.strip())
+    has_tix = bool(tickers and tickers.strip())
+    has_ex = bool(exchange and exchange.strip())
+    if sum(1 for x in (has_sym, has_tix, has_ex) if x) > 1:
+        return json.dumps({"error": "pass at most one of symbol, tickers, or exchange"})
     if symbol:
-        tick_list = [symbol.upper()]
+        tick_list = [symbol.strip().upper()]
     if tickers:
         try:
             t = json.loads(tickers)
@@ -501,12 +568,22 @@ def run_scan(
                     "hint": "Use valid JSON with double quotes, e.g. [\"AAPL\", \"MSFT\"].",
                 }
             )
+    if exchange:
+        exu = exchange.strip().upper()
+        if exu not in _EXCHANGES:
+            return json.dumps({"error": f"invalid exchange: {exchange}; use NYSE, NASDAQ, AMEX, or CRYPTO"})
+        try:
+            tick_list = fetch_exchange_tickers(exu)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        if not tick_list:
+            return json.dumps({"error": "no symbols returned for exchange", "exchange": exu})
 
     if all_signal_types:
         if signal_id is not None:
             return json.dumps({"error": "signal_id cannot be used with all_signal_types"})
         if not tick_list:
-            return json.dumps({"error": "all_signal_types requires symbol or tickers"})
+            return json.dumps({"error": "all_signal_types requires symbol, tickers, or exchange"})
 
         triggered_results: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
@@ -546,6 +623,7 @@ def run_scan(
         return json.dumps(
             {
                 "symbols": tick_list,
+                "exchange": exchange.strip().upper() if exchange and exchange.strip() else None,
                 "mode": "all_signal_types",
                 "results": triggered_results,
                 "count": len(triggered_results),
@@ -559,13 +637,14 @@ def run_scan(
 
     st = _get_store()
     results: list[dict[str, Any]] = []
+    watch_syms = [w.symbol for w in st.watchlist_get()]
     srows = st.signal_list()
     if signal_id is not None:
         srows = [r for r in srows if r.id == signal_id and r.enabled]
     else:
         srows = [r for r in srows if r.enabled]
     for srow in srows:
-        tix = tick_list or srow.ticker_overrides or [w.symbol for w in st.watchlist_get()]
+        tix = tick_list if tick_list is not None else _resolve_signal_universe(srow, watch_syms)
         if not tix:
             continue
         asig = ActiveSignal(

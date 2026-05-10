@@ -157,14 +157,30 @@ def run_create_signal(args: argparse.Namespace) -> None:
     if not args.mutate:
         print("\nPass --mutate to create a persisted signal in the local SQLite DB.")
         return
-    ticker_overrides = json.dumps(_symbols(args)) if args.signal_tickers else None
+    if args.signal_tickers and args.signal_exchange:
+        print("\nUse only one of --signal-tickers or --signal-exchange.")
+        return
+    if args.signal_tickers:
+        ticker_scope = "tickers"
+        ticker_overrides = json.dumps(_symbols(args))
+        sig_exchange = None
+    elif args.signal_exchange:
+        ticker_scope = "exchange"
+        ticker_overrides = None
+        sig_exchange = args.signal_exchange
+    else:
+        ticker_scope = "watchlist"
+        ticker_overrides = None
+        sig_exchange = None
     _run(
         "create_signal",
         lambda: server.create_signal(
             args.signal_name,
             args.signal_type,
             args.signal_params,
-            ticker_overrides,
+            ticker_scope=ticker_scope,
+            ticker_overrides=ticker_overrides,
+            exchange=sig_exchange,
         ),
     )
     _run("list_signals", server.list_signals)
@@ -194,9 +210,16 @@ def run_watchlist(args: argparse.Namespace) -> None:
 
 
 def run_scan(args: argparse.Namespace) -> None:
-    """Run scan without ticker overrides unless --symbols was provided."""
+    """Run scan without ticker overrides unless --symbols or --scan-exchange was provided."""
     tickers = json.dumps(args.symbols) if args.symbols else None
-    _run("run_scan", lambda: server.run_scan(tickers=tickers))
+    ex = args.scan_exchange
+    _run(
+        "run_scan",
+        lambda: server.run_scan(
+            tickers=tickers,
+            exchange=ex,
+        ),
+    )
 
 
 def run_chart(args: argparse.Namespace) -> None:
@@ -249,7 +272,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", default="1d", help="Chart/history interval")
     parser.add_argument("--expiry", default=None, help="Option expiry YYYY-MM-DD")
     parser.add_argument("--exchange", default="NASDAQ", help="Mover exchange: NYSE, NASDAQ, AMEX, or CRYPTO")
-    parser.add_argument("--limit", type=int, default=5, help="Mover result limit")
+    parser.add_argument(
+        "--scan-exchange",
+        default=None,
+        metavar="NYSE|NASDAQ|AMEX|CRYPTO",
+        help="With scan: run on full Yahoo screener universe for that venue",
+    )
     parser.add_argument("--signal-name", default="local test signal", help="Name to use with --tool create_signal")
     parser.add_argument("--signal-id", type=int, default=None, help="Signal ID for --tool delete_signal")
     parser.add_argument(
@@ -261,7 +289,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--signal-tickers",
         action="store_true",
-        help="Use --symbols as ticker_overrides when creating a signal",
+        help="Use --symbols as ticker_overrides (ticker_scope=tickers)",
+    )
+    parser.add_argument(
+        "--signal-exchange",
+        default=None,
+        metavar="NYSE|NASDAQ|AMEX|CRYPTO",
+        help="With create_signal: scan full exchange instead of watchlist (cannot combine with --signal-tickers)",
     )
     parser.add_argument(
         "--chart-type",
