@@ -143,7 +143,7 @@ def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dic
     if study.price.empty or not study.events or not any(summary.get(w, {}).get("n") for w in study.windows):
         raise ValueError("No events or no forward returns; try a different symbol/event_type")
 
-    marker_window = max(study.windows)
+    marker_window = _forward_marker_window(study)
     marker_dates: dict[str, list[Any]] = {"positive": [], "negative": [], "neutral": []}
     marker_prices: dict[str, list[float]] = {"positive": [], "negative": [], "neutral": []}
     marker_text: dict[str, list[str]] = {"positive": [], "negative": [], "neutral": []}
@@ -326,6 +326,16 @@ def _forward_event_title(event_type: str, params: dict[str, Any] | None) -> str:
         signal = int(p.get("signal", 9))
         return f"MACD Bullish Crossover ({fast}/{slow} MACD crosses above {signal}-day signal)"
     return event_type.replace("_", " ")
+
+
+def _forward_marker_window(study: Any) -> int:
+    """Choose the largest forward window that has usable event results."""
+    for window in sorted(study.windows, reverse=True):
+        for ev in study.events:
+            result = ev.windows.get(window)
+            if result is not None and np.isfinite(result.final_return):
+                return int(window)
+    raise ValueError("No events or no forward returns; try a different symbol/event_type")
 
 
 def _format_number(value: float) -> str:

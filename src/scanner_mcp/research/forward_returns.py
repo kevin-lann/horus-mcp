@@ -181,7 +181,7 @@ def compute_event_forward_study_from_history(
     if df is None or df.empty or "Close" not in df.columns:
         return ForwardStudy(symbol=symbol, event_type=event_type, windows=w_int, price=pd.Series(dtype=float), events=[])
 
-    registry = detectors or DETECTORS
+    registry = DETECTORS if detectors is None else detectors
     detector = registry.get(event_type)
     if detector is None:
         return ForwardStudy(symbol=symbol, event_type=event_type, windows=w_int, price=pd.Series(dtype=float), events=[])

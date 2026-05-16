@@ -43,6 +43,23 @@ class ForwardReturnsTest(unittest.TestCase):
         self.assertAlmostEqual(event.windows[4].final_return, 15.5)
         self.assertAlmostEqual(event.windows[4].max_gain, 21.0)
 
+    def test_empty_detector_registry_is_respected(self) -> None:
+        df = pd.DataFrame(
+            {"Close": [100.0, 110.0, 120.0]},
+            index=pd.date_range("2024-01-01", periods=3),
+        )
+
+        study = compute_event_forward_study_from_history(
+            df,
+            "XYZ",
+            "rsi_oversold",
+            [1],
+            detectors={},
+        )
+
+        self.assertTrue(study.price.empty)
+        self.assertEqual(study.events, [])
+
     def test_incomplete_horizons_are_excluded(self) -> None:
         df = pd.DataFrame(
             {"Close": [100.0, 95.0, 98.0]},
@@ -206,6 +223,50 @@ class ForwardReturnsTest(unittest.TestCase):
             _forward_event_title("macd_bullish_crossover", {"fast": 8, "slow": 21, "signal": 5}),
             "MACD Bullish Crossover (8/21 MACD crosses above 5-day signal)",
         )
+
+    def test_forward_returns_chart_uses_largest_populated_marker_window(self) -> None:
+        price = pd.Series(
+            [100.0, 104.0],
+            index=pd.date_range("2024-01-01", periods=2),
+        )
+        study = ForwardStudy(
+            symbol="XYZ",
+            event_type="rsi_oversold",
+            windows=[1, 3],
+            price=price,
+            events=[
+                ForwardEvent(
+                    index=0,
+                    date=price.index[0],
+                    price=100.0,
+                    label="RSI Oversold",
+                    event_type="rsi_oversold",
+                    windows={1: ForwardWindowResult(final_return=4.0, max_loss=0.0, max_gain=4.0)},
+                )
+            ],
+        )
+        provider = object()
+        marker_names: list[str | None] = []
+        marker_text: list[str] = []
+
+        def fake_fig_to_b64(fig, _chart_type: str) -> str:
+            marker_names.extend(trace.name for trace in fig.data if getattr(trace, "mode", None) == "markers")
+            for trace in fig.data:
+                if getattr(trace, "mode", None) == "markers":
+                    marker_text.extend(trace.text)
+            return "pngdata"
+
+        with (
+            patch("scanner_mcp.research.forward_returns.compute_event_forward_study", return_value=study),
+            patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_fig_to_b64),
+        ):
+            _forward_returns_chart(
+                provider=provider,
+                p={"symbol": "XYZ", "event_type": "rsi_oversold", "windows": [1, 3]},
+            )
+
+        self.assertIn("Signal Positive After 1d", marker_names)
+        self.assertEqual(marker_text, ["RSI Oversold<br>1d return: 4.0%"])
 
     def test_summary_aggregates_by_window(self) -> None:
         df = pd.DataFrame(
