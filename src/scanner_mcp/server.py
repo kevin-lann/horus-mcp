@@ -800,6 +800,35 @@ def chart_price_overlay(
 
 
 @mcp.tool()
+def chart_fundamental_overlay(
+    symbol: str = "AAPL",
+    metric: Literal["revenue", "earnings"] = "revenue",
+    frequency: Literal["quarterly", "annual"] = "quarterly",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "5y",
+    interval: Annotated[str, Field(description="yfinance price bar size, usually 1d for this chart.")] = "1d",
+    price_style: Literal["candlestick", "line"] = "line",
+) -> Image | str:
+    """Price chart overlaid with income-statement bars for revenue or earnings.
+
+    `symbol`: yfinance ticker.
+    `metric`: `revenue` uses Total Revenue; `earnings` uses Net Income.
+    `frequency`: quarterly by default (although limited historical data by Yahoo data availability); annual uses fiscal-year statements.
+    Returns PNG image; on failure JSON text with `error`.
+    """
+    return _chart_tool_result(
+        "fundamental_overlay",
+        {
+            "symbol": symbol,
+            "metric": metric,
+            "frequency": frequency,
+            "period": period,
+            "interval": interval,
+            "price_style": price_style,
+        },
+    )
+
+
+@mcp.tool()
 def chart_forward_returns(
     symbol: str = "SPY",
     event_type: Literal[

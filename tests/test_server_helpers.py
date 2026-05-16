@@ -73,6 +73,22 @@ class ServerHelpersTest(unittest.TestCase):
         ):
             self.assertEqual(json.loads(server._chart_tool_result("x", {}))["error"], "boom")
 
+    def test_chart_fundamental_overlay_passes_params(self) -> None:
+        with patch("scanner_mcp.server._chart_tool_result", return_value="ok") as chart_tool:
+            self.assertEqual(server.chart_fundamental_overlay("msft", "earnings", "annual", "10y", "1d", "line"), "ok")
+
+        chart_tool.assert_called_once_with(
+            "fundamental_overlay",
+            {
+                "symbol": "msft",
+                "metric": "earnings",
+                "frequency": "annual",
+                "period": "10y",
+                "interval": "1d",
+                "price_style": "line",
+            },
+        )
+
     def test_create_signal_validates_scope_arguments_and_persists(self) -> None:
         class FakeStore:
             def signal_create(self, name, signal_type, params, ticker_overrides, ticker_scope, exchange):  # noqa: ANN001

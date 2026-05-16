@@ -62,6 +62,8 @@ def generate_chart(
         return _price_history(provider, params)
     if ct == "price_overlay":
         return _price_overlay(provider, params)
+    if ct == "fundamental_overlay":
+        return _fundamental_overlay(provider, params)
     if ct == "forward_returns":
         return _forward_returns_chart(provider, params)
     if ct == "drawdown_comparison":
@@ -159,6 +161,45 @@ def _trailing_pe_series(symbol: str, close: pd.Series) -> pd.Series:
     pe_q = _quarterly_ttm_pe_series(symbol, close)
     pe_a = _annual_fy_eps_pe_series(symbol, close)
     return pe_q.combine_first(pe_a)
+
+
+def _statement_metric_series(stmt: pd.DataFrame, metric: str) -> pd.Series:
+    """Extract a supported fundamental metric from a yfinance income statement."""
+    if stmt is None or stmt.empty:
+        return pd.Series(dtype=float)
+    metric_key = str(metric).strip().lower()
+    row_candidates = {
+        "revenue": ("Total Revenue", "Operating Revenue"),
+        "earnings": (
+            "Net Income",
+            "Net Income Common Stockholders",
+            "Net Income From Continuing Operation Net Minority Interest",
+        ),
+    }
+    if metric_key not in row_candidates:
+        raise ValueError("metric must be revenue or earnings")
+    for row_name in row_candidates[metric_key]:
+        if row_name in stmt.index:
+            out = stmt.loc[row_name].dropna().sort_index().astype(float)
+            out.index = pd.DatetimeIndex(out.index)
+            return out
+    raise ValueError(f"No {metric_key} data in yfinance income statement")
+
+
+def _fundamental_series(symbol: str, metric: str, frequency: str) -> pd.Series:
+    """Fetch annual or quarterly income-statement data from yfinance."""
+    import yfinance as yf
+
+    sym = str(symbol).strip().upper()
+    freq = str(frequency).strip().lower()
+    ticker = yf.Ticker(sym)
+    if freq in {"annual", "yearly", "year"}:
+        stmt = ticker.incomestmt
+    elif freq in {"quarterly", "quarter", "q"}:
+        stmt = ticker.quarterly_incomestmt
+    else:
+        raise ValueError("frequency must be quarterly or annual")
+    return _statement_metric_series(stmt, metric)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -562,6 +603,106 @@ def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         yaxis_title="Y",
     )
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_overlay")}
+
+
+def _format_large_axis(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:g}"
+
+
+def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Overlay price history with revenue or earnings bars from income statements."""
+    sym = str(p.get("symbol", "AAPL")).strip().upper()
+    period = p.get("period", "5y")
+    interval = p.get("interval", "1d")
+    metric = str(p.get("metric", "revenue")).strip().lower()
+    frequency = str(p.get("frequency", "quarterly")).strip().lower()
+    price_style = str(p.get("price_style", "candlestick")).strip().lower()
+
+    df = provider.get_history(sym, period=str(period), interval=str(interval))
+    if df.empty:
+        raise ValueError("No price data")
+    fundamentals = _fundamental_series(sym, metric, frequency)
+    if fundamentals.empty:
+        raise ValueError(f"No {metric} data")
+
+    start = pd.Timestamp(df.index[0])
+    end = pd.Timestamp(df.index[-1])
+    if start.tzinfo is not None:
+        start = start.tz_convert(None)
+    if end.tzinfo is not None:
+        end = end.tz_convert(None)
+    fidx = pd.DatetimeIndex(fundamentals.index)
+    if fidx.tz is not None:
+        fidx = fidx.tz_convert("UTC").tz_localize(None)
+    fundamentals = pd.Series(fundamentals.to_numpy(dtype=float), index=fidx)
+    visible_fundamentals = fundamentals[(fundamentals.index >= start) & (fundamentals.index <= end)]
+    if visible_fundamentals.empty:
+        raise ValueError(f"No {metric} data within visible price period")
+
+    metric_title = "Revenue" if metric == "revenue" else "Earnings"
+    frequency_title = "Annual" if frequency in {"annual", "yearly", "year"} else "Quarterly"
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    bar_color = "#0f766e" if metric == "revenue" else "#7c2d12"
+    fig.add_trace(
+        go.Bar(
+            x=visible_fundamentals.index,
+            y=visible_fundamentals.values,
+            name=f"{frequency_title} {metric_title}",
+            marker={"color": bar_color},
+            opacity=0.34,
+            hovertemplate=f"{frequency_title} {metric_title}<br>%{{x|%Y-%m-%d}}<br>%{{customdata}}<extra></extra>",
+            customdata=[_format_large_axis(float(v)) for v in visible_fundamentals.values],
+        ),
+        secondary_y=True,
+    )
+    if price_style == "line":
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df["Close"].astype(float),
+                name=f"{sym} Close",
+                mode="lines",
+                line={"color": "#111827", "width": 1.9},
+            ),
+            secondary_y=False,
+        )
+    else:
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
+                name=sym,
+            ),
+            secondary_y=False,
+        )
+    fig.update_layout(
+        title=f"{sym} price vs {frequency_title.lower()} {metric_title.lower()}",
+        xaxis_title="Date",
+        xaxis_rangeslider_visible=False,
+        yaxis_title="Price",
+        yaxis2_title=metric_title,
+        width=1150,
+        height=680,
+        margin={"l": 56, "r": 72, "t": 76, "b": 48},
+        legend={"orientation": "h", "x": 0.02, "xanchor": "left", "y": 1, "yanchor": "top"},
+        hovermode="x unified",
+        bargap=0.35,
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+    )
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(17,24,39,0.08)", secondary_y=False)
+    fig.update_yaxes(showgrid=False, tickformat=".3s", secondary_y=True)
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "fundamental_overlay")}
 
 
 def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
