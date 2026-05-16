@@ -62,6 +62,12 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 - Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
 - Charts (typed args): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle` — each uses `_chart_tool_result`, which on success returns a FastMCP `Image` (`Image(data=base64.b64decode(...))`: raw PNG bytes wrapped for an MCP image block). On failure it returns JSON text with an `error` field.
 
+## Unit tests
+Run unit tests for the entire repo using:
+```bash
+python3 -m pytest
+```
+
 ## Local tool testing
 
 Use `test.py` to smoke-test tools directly from the repo without starting an MCP client. Run it from the project root after setup:
@@ -105,7 +111,7 @@ By default, `scan` does not pass a ticker override. It lets each persisted signa
 Use the official MCP inspector tool for visual debugging:
 
 ```bash
-c
+npx @modelcontextprotocol/inspector scanner-mcp
 ```
 
 ## Resources

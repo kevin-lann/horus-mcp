@@ -61,6 +61,15 @@ class SignalCalculationsTest(unittest.TestCase):
         out = calc.pct_distance_from_ma(close, ma)
 
         self.assertEqual(out.tolist(), [0.0, 10.0, 10.0])
+    
+    def test_pct_distance_from_ma_handles_zero_ma(self) -> None:
+        close = pd.Series([100.0, 110.0])
+        ma = pd.Series([100.0, 0.0])
+        
+        out = calc.pct_distance_from_ma(close, ma)
+        
+        self.assertEqual(out.iloc[0], 0.0)
+        self.assertTrue(pd.isna(out.iloc[1]))  # or expect inf, depending on fix
 
     def test_rsi_threshold_cross_indexes_detects_entry_only(self) -> None:
         close = pd.Series([100.0, 99.0, 98.0, 97.0, 96.0])

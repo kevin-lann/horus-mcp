@@ -783,7 +783,7 @@ def chart_forward_returns(
 
     Uses ~10y daily history; `period` is not configurable.
     `windows`: forward horizons in **trading bars** along the daily close series
-    (default 21, 42, 63, 84, 105, 126, 252; about 1-6 and 12 months).
+    (default 5, 10, 21, 42, 63, 126, 252; about 1-6 and 12 months).
     Supported `event_type`: rsi_oversold, rsi_overbought, golden_cross,
     macd_bullish_crossover, pct_from_ma.
     `event_params`: optional event-specific detector parameters. For `pct_from_ma`,

@@ -91,7 +91,10 @@ def macd(
 
 def pct_distance_from_ma(close: pd.Series, ma: pd.Series) -> pd.Series:
     """Return absolute percent distance between price and a moving average."""
-    return (close - ma).abs() / ma.abs() * 100.0
+    ma_abs = ma.abs()
+    # Avoid division by zero; replace zeros with NaN to propagate gracefully
+    ma_abs = ma_abs.replace(0, float('nan'))
+    return (close - ma).abs() / ma_abs * 100.0
 
 
 def rsi_threshold_cross_indexes(
