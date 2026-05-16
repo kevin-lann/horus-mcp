@@ -71,27 +71,173 @@ def generate_chart(
     raise ValueError(f"Unknown chart_type: {chart_type}")
 
 
+def _to_naive_asof_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Strip timezone and normalize to midnight for merge_asof on daily fundamentals."""
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    return idx.normalize()
+
+
+def _merge_asof_price_over_eps(
+    close: pd.Series,
+    anchor_dates: pd.DatetimeIndex,
+    eps_values: np.ndarray,
+) -> pd.Series:
+    """For each bar date, use the latest EPS row with anchor date <= bar (naive calendar day)."""
+    df_sorted = close.sort_index().astype(float)
+    hist = pd.DataFrame(
+        {
+            "asof": _to_naive_asof_dates(pd.DatetimeIndex(df_sorted.index)),
+            "close": df_sorted.values,
+        }
+    )
+    right = pd.DataFrame(
+        {
+            "anchor": _to_naive_asof_dates(pd.DatetimeIndex(anchor_dates)),
+            "eps": eps_values.astype(float),
+        }
+    ).sort_values("anchor")
+    merged = pd.merge_asof(hist, right, left_on="asof", right_on="anchor", direction="backward")
+    denom = merged["eps"].to_numpy(dtype=float)
+    num = merged["close"].to_numpy(dtype=float)
+    pe_vals = np.where(np.isfinite(denom) & (denom > 0), num / denom, np.nan)
+    pe_sorted = pd.Series(pe_vals, index=df_sorted.index, dtype=float)
+    return pe_sorted.reindex(close.index)
+
+
+def _quarterly_ttm_pe_series(symbol: str, close: pd.Series) -> pd.Series:
+    """P/E from rolling 4-quarter Diluted (or Basic) EPS vs close (Yahoo caps at ~5 quarters)."""
+    import yfinance as yf
+
+    sym = str(symbol).strip().upper()
+    stmt = yf.Ticker(sym).quarterly_incomestmt
+    if stmt is None or stmt.empty:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    if "Diluted EPS" in stmt.index:
+        qeps = stmt.loc["Diluted EPS"]
+    elif "Basic EPS" in stmt.index:
+        qeps = stmt.loc["Basic EPS"]
+    else:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    qeps = qeps.dropna().sort_index().astype(float)
+    if len(qeps) < 4:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    ttm = qeps.rolling(window=4, min_periods=4).sum()
+    ttm = ttm.dropna()
+    if ttm.empty:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    return _merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
+
+
+def _annual_fy_eps_pe_series(symbol: str, close: pd.Series) -> pd.Series:
+    """P/E vs fiscal-year Diluted (or Basic) EPS from annual statements (longer history than quarterly cap)."""
+    import yfinance as yf
+
+    sym = str(symbol).strip().upper()
+    stmt = yf.Ticker(sym).incomestmt
+    if stmt is None or stmt.empty:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    if "Diluted EPS" in stmt.index:
+        fy = stmt.loc["Diluted EPS"]
+    elif "Basic EPS" in stmt.index:
+        fy = stmt.loc["Basic EPS"]
+    else:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    fy = fy.dropna().sort_index().astype(float)
+    if fy.empty:
+        return pd.Series(np.nan, index=close.index, dtype=float)
+    return _merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
+
+
+def _trailing_pe_series(symbol: str, close: pd.Series) -> pd.Series:
+    """P/E aligned to `close`: prefer quarterly TTM where Yahoo provides enough quarters; else FY EPS.
+
+    Yahoo fundamentals cap quarterly columns (~5), so true TTM only exists for the last ~1–2 years.
+    Annual Diluted EPS keyed on fiscal year-end fills earlier dates (FY P/E, not TTM).
+    """
+    pe_q = _quarterly_ttm_pe_series(symbol, close)
+    pe_a = _annual_fy_eps_pe_series(symbol, close)
+    return pe_q.combine_first(pe_a)
+
+
 def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
     """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
     interval = p.get("interval", "1d")
+    pe_subchart = bool(p.get("pe_subchart", False))
     df = provider.get_history(str(sym), period=str(period), interval=str(interval))
     if df.empty:
         raise ValueError("No price data")
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=df.index,
-                open=df["Open"],
-                high=df["High"],
-                low=df["Low"],
-                close=df["Close"],
-                name=sym,
-            )
-        ]
+    if not pe_subchart:
+        fig = go.Figure(
+            data=[
+                go.Candlestick(
+                    x=df.index,
+                    open=df["Open"],
+                    high=df["High"],
+                    low=df["Low"],
+                    close=df["Close"],
+                    name=sym,
+                )
+            ]
+        )
+        fig.update_layout(xaxis_rangeslider_visible=False)
+        fig.update_layout(title=f"{sym} {period} {interval}", xaxis_title="Date", yaxis_title="Price")
+        return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
+
+    close = df["Close"].astype(float)
+    pe = _trailing_pe_series(sym, close)
+    if not np.isfinite(pe.to_numpy(dtype=float)).any():
+        raise ValueError(
+            "No P/E for this symbol (no usable quarterly TTM or annual Diluted/Basic EPS in "
+            "yfinance; many ETFs and funds have none)."
+        )
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.68, 0.32],
     )
-    fig.update_layout(title=f"{sym} {period} {interval}", xaxis_title="Date", yaxis_title="Price")
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name=sym,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=pe,
+            name="P/E (TTM or FY EPS)",
+            mode="lines",
+            line={"color": "#2563eb", "width": 1.4},
+            connectgaps=False,
+        ),
+        row=2,
+        col=1,
+    )
+    fig.update_layout(
+        title=f"{sym} {period} {interval}",
+        xaxis_rangeslider_visible=False,
+        height=720,
+        margin={"l": 56, "r": 24, "t": 56, "b": 40},
+        legend={"orientation": "h", "x": 0.02, "y": 1.02},
+        hovermode="x unified",
+    )
+    fig.update_xaxes(rangeslider_visible=False, showticklabels=False, row=1, col=1)
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="P/E (TTM or FY EPS)", row=2, col=1)
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
 

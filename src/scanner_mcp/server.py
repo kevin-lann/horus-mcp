@@ -737,11 +737,21 @@ def chart_price_history(
     symbol: str = "SPY",
     period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
     interval: Annotated[str, Field(description="yfinance bar size (e.g. 1d, 1h); intraday couples to allowed period ranges")] = "1d",
+    pe_subchart: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, add a lower panel for P/E vs EPS: quarterly TTM where Yahoo provides "
+                "enough quarters, otherwise fiscal-year Diluted EPS (Yahoo caps statement history; "
+                "ETFs often have no EPS)."
+            )
+        ),
+    ] = False,
 ) -> Image | str:
     """Candlestick price history chart. Returns PNG image; on failure JSON text with `error`."""
     return _chart_tool_result(
         "price_history",
-        {"symbol": symbol, "period": period, "interval": interval},
+        {"symbol": symbol, "period": period, "interval": interval, "pe_subchart": pe_subchart},
     )
 
 
