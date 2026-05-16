@@ -114,7 +114,7 @@ class ChartGeneratorTest(unittest.TestCase):
 
         def fake_render(fig, chart_type: str) -> str:
             self.assertEqual(chart_type, "fundamental_overlay")
-            self.assertEqual(fig.data[0].name, "Annual Revenue")
+            self.assertEqual(fig.data[0].name, "Quarterly Revenue")
             self.assertEqual(fig.data[1].name, "XYZ")
             return "pngdata"
 
