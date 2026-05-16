@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from scanner_mcp.data.provider import YFinanceProvider
-from scanner_mcp.indicators.core import Indicators
+from scanner_mcp.indicators import ta
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 
 log = logging.getLogger(__name__)
@@ -161,30 +161,342 @@ def _trailing_pe_series(symbol: str, close: pd.Series) -> pd.Series:
     return pe_q.combine_first(pe_a)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Parse bool-like MCP/JSON values without treating every non-empty string as true."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return default
+    return out if out > 0 else default
+
+
+def _add_price_trace(fig: go.Figure, trace: Any, row: int | None = None) -> None:
+    if row is None:
+        fig.add_trace(trace)
+    else:
+        fig.add_trace(trace, row=row, col=1)
+
+
+def _add_price_history_main_traces(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    symbol: str,
+    p: dict[str, Any],
+    row: int | None = None,
+) -> None:
+    """Add price-history candlesticks plus optional overlays to a figure."""
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    x = df.index
+
+    _add_price_trace(
+        fig,
+        go.Candlestick(
+            x=x,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name=symbol,
+        ),
+        row,
+    )
+
+    if _as_bool(p.get("show_bollinger_bands", p.get("bollinger_bands", False))):
+        period = _positive_int(p.get("bb_period", 20), 20)
+        std = float(p.get("bb_std", 2.0))
+        bands = ta.bbands(close, length=period, std=std)
+        lower = bands[f"BBL_{period}_{std}"]
+        mid = bands[f"BBM_{period}_{std}"]
+        upper = bands[f"BBU_{period}_{std}"]
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=lower,
+                name=f"BB lower ({period}, {std:g})",
+                mode="lines",
+                line={"color": "rgba(37, 99, 235, 0.55)", "width": 1},
+                connectgaps=False,
+            ),
+            row,
+        )
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=upper,
+                name=f"BB upper ({period}, {std:g})",
+                mode="lines",
+                line={"color": "rgba(37, 99, 235, 0.55)", "width": 1},
+                fill="tonexty",
+                fillcolor="rgba(37, 99, 235, 0.08)",
+                connectgaps=False,
+            ),
+            row,
+        )
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=mid,
+                name=f"BB mid ({period})",
+                mode="lines",
+                line={"color": "#2563eb", "width": 1, "dash": "dot"},
+                connectgaps=False,
+            ),
+            row,
+        )
+
+    if _as_bool(p.get("show_ma_cloud", p.get("ma_cloud", False))):
+        fast = _positive_int(p.get("ma_cloud_fast", 50), 50)
+        slow = _positive_int(p.get("ma_cloud_slow", 200), 200)
+        fast_ma = ta.sma(close, length=fast)
+        slow_ma = ta.sma(close, length=slow)
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=slow_ma,
+                name=f"SMA {slow}",
+                mode="lines",
+                line={"color": "rgba(107, 114, 128, 0.75)", "width": 1.1},
+                connectgaps=False,
+            ),
+            row,
+        )
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=fast_ma,
+                name=f"SMA {fast} cloud",
+                mode="lines",
+                line={"color": "rgba(14, 165, 164, 0.85)", "width": 1.1},
+                fill="tonexty",
+                fillcolor="rgba(14, 165, 164, 0.10)",
+                connectgaps=False,
+            ),
+            row,
+        )
+
+    if _as_bool(p.get("show_ma", p.get("ma", False))):
+        period = _positive_int(p.get("ma_period", 50), 50)
+        ma = ta.sma(close, length=period)
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=ma,
+                name=f"SMA {period}",
+                mode="lines",
+                line={"color": "#f59e0b", "width": 1.6},
+                connectgaps=False,
+            ),
+            row,
+        )
+
+    if _as_bool(p.get("show_ema", p.get("ema", False))):
+        period = _positive_int(p.get("ema_period", 21), 21)
+        ema = ta.ema(close, length=period)
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=ema,
+                name=f"EMA {period}",
+                mode="lines",
+                line={"color": "#7c3aed", "width": 1.5},
+                connectgaps=False,
+            ),
+            row,
+        )
+
+    if _as_bool(p.get("show_avwap", p.get("avwap", False))):
+        avwap = _anchored_vwap(df, p.get("avwap_anchor"))
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=x,
+                y=avwap,
+                name="aVWAP",
+                mode="lines",
+                line={"color": "#dc2626", "width": 1.5},
+                connectgaps=False,
+            ),
+            row,
+        )
+
+    if _price_history_has_fib(p):
+        _add_fib_retracement_traces(fig, x, high, low, row)
+
+
+def _anchored_vwap(df: pd.DataFrame, anchor: Any = None) -> pd.Series:
+    """Return VWAP anchored to the first visible bar, or to `anchor` when supplied."""
+    idx = pd.DatetimeIndex(df.index)
+    typical = (df["High"].astype(float) + df["Low"].astype(float) + df["Close"].astype(float)) / 3.0
+    volume = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(1.0, index=df.index)
+    typical = typical.where(volume > 0)
+    if anchor:
+        anchor_ts = pd.Timestamp(anchor)
+        if idx.tz is not None:
+            anchor_ts = (
+                anchor_ts.tz_localize(idx.tz)
+                if anchor_ts.tzinfo is None
+                else anchor_ts.tz_convert(idx.tz)
+            )
+        elif anchor_ts.tzinfo is not None:
+            anchor_ts = anchor_ts.tz_convert(None)
+        mask = idx >= anchor_ts
+        typical = typical.where(mask)
+        volume = volume.where(mask)
+    cum_volume = volume.cumsum()
+    return (typical * volume).cumsum() / cum_volume.replace(0, np.nan)
+
+
+def _add_fib_retracement_traces(
+    fig: go.Figure,
+    x: pd.Index,
+    high: pd.Series,
+    low: pd.Series,
+    row: int | None = None,
+) -> None:
+    low_idx = low.idxmin()
+    high_idx = high.idxmax()
+    swing_low = float(low.loc[low_idx])
+    swing_high = float(high.loc[high_idx])
+    span = swing_high - swing_low
+    if not np.isfinite(span) or span <= 0:
+        return
+    uptrend = low_idx <= high_idx
+    label_x = _fib_label_x(pd.Index(x))
+    ratios = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    for ratio in ratios:
+        level = swing_high - span * ratio if uptrend else swing_low + span * ratio
+        label = f"{ratio:g} {level:.2f}"
+        _add_price_trace(
+            fig,
+            go.Scatter(
+                x=[x[0], label_x],
+                y=[level, level],
+                name=f"Fib {ratio:g}",
+                mode="lines",
+                line={"color": "rgba(75, 85, 99, 0.35)", "width": 1},
+                hovertemplate=f"{label}<extra></extra>",
+                showlegend=False,
+            ),
+            row,
+        )
+        fig.add_annotation(
+            x=0.995,
+            xref="paper",
+            xanchor="right",
+            y=level+2,
+            yref="y" if row in (None, 1) else f"y{row}",
+            text=label,
+            showarrow=False,
+            font={"color": "#4b5563", "size": 8},
+            align="right",
+            bgcolor="rgba(255,255,255,0.0)",
+        )
+
+
+def _price_history_legend_layout() -> dict[str, Any]:
+    """Place price-history legends above the plot area, not over the data."""
+    return {
+        "orientation": "h",
+        "x": 0.02,
+        "xanchor": "left",
+        "y": 1.1,
+        "yanchor": "top",
+        "bgcolor": "rgba(255,255,255,0.85)",
+    }
+
+
+def _price_history_has_fib(p: dict[str, Any]) -> bool:
+    return _as_bool(p.get("show_fib_retracement", p.get("fib_retracement", False)))
+
+
+def _fib_x_padding(index: pd.Index) -> tuple[list[Any], Any] | None:
+    """Return an extended x-axis range and label anchor beyond the latest bar."""
+    if len(index) < 2:
+        return None
+    if isinstance(index, pd.DatetimeIndex):
+        start = index[0]
+        end = index[-1]
+        span = end - start
+        diffs = index.to_series().diff().dropna()
+        step = diffs.median() if not diffs.empty else pd.Timedelta(days=1)
+        pad = max(span * 0.08, step * 8)
+        padded_end = end + pad
+        return [start, padded_end], end + (pad * 0.9)
+    try:
+        start = float(index[0])
+        end = float(index[-1])
+    except (TypeError, ValueError):
+        return None
+    span = end - start
+    if not np.isfinite(span) or span <= 0:
+        return None
+    pad = span * 0.08
+    padded_end = end + pad
+    return [start, padded_end], end + (pad * 0.9)
+
+
+def _fib_label_x(index: pd.Index) -> Any:
+    padding = _fib_x_padding(index)
+    if padding is None:
+        return index[-1]
+    return padding[1]
+
+
+def _apply_fib_x_padding(fig: go.Figure, df: pd.DataFrame, p: dict[str, Any], rows: int = 1) -> None:
+    if not _price_history_has_fib(p):
+        return
+    padding = _fib_x_padding(pd.Index(df.index))
+    if padding is None:
+        return
+    x_range = padding[0]
+    if rows == 1:
+        fig.update_xaxes(range=x_range)
+        return
+    for row in range(1, rows + 1):
+        fig.update_xaxes(range=x_range, row=row, col=1)
+
+
 def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
     """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
     interval = p.get("interval", "1d")
-    pe_subchart = bool(p.get("pe_subchart", False))
+    pe_subchart = _as_bool(p.get("pe_subchart", False))
     df = provider.get_history(str(sym), period=str(period), interval=str(interval))
     if df.empty:
         raise ValueError("No price data")
     if not pe_subchart:
-        fig = go.Figure(
-            data=[
-                go.Candlestick(
-                    x=df.index,
-                    open=df["Open"],
-                    high=df["High"],
-                    low=df["Low"],
-                    close=df["Close"],
-                    name=sym,
-                )
-            ]
-        )
+        fig = go.Figure()
+        _add_price_history_main_traces(fig, df, str(sym), p)
         fig.update_layout(xaxis_rangeslider_visible=False)
-        fig.update_layout(title=f"{sym} {period} {interval}", xaxis_title="Date", yaxis_title="Price")
+        fig.update_layout(
+            title=f"{sym} {period} {interval}",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            margin={"l": 56, "r": 32, "t": 82, "b": 56},
+            legend=_price_history_legend_layout(),
+            hovermode="x unified",
+        )
+        _apply_fib_x_padding(fig, df, p)
         return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
     close = df["Close"].astype(float)
@@ -202,18 +514,7 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         vertical_spacing=0.06,
         row_heights=[0.68, 0.32],
     )
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name=sym,
-        ),
-        row=1,
-        col=1,
-    )
+    _add_price_history_main_traces(fig, df, str(sym), p, row=1)
     fig.add_trace(
         go.Scatter(
             x=df.index,
@@ -230,12 +531,13 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         title=f"{sym} {period} {interval}",
         xaxis_rangeslider_visible=False,
         height=720,
-        margin={"l": 56, "r": 24, "t": 56, "b": 40},
-        legend={"orientation": "h", "x": 0.02, "y": 1.02},
+        margin={"l": 56, "r": 32, "t": 82, "b": 40},
+        legend=_price_history_legend_layout(),
         hovermode="x unified",
     )
     fig.update_xaxes(rangeslider_visible=False, showticklabels=False, row=1, col=1)
     fig.update_xaxes(title_text="Date", row=2, col=1)
+    _apply_fib_x_padding(fig, df, p, rows=2)
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="P/E (TTM or FY EPS)", row=2, col=1)
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
