@@ -105,14 +105,16 @@ By default, `scan` does not pass a ticker override. It lets each persisted signa
 Use the official MCP inspector tool for visual debugging:
 
 ```bash
-npx @modelcontextprotocol/inspector scanner-mcp
+c
 ```
 
 ## Resources
 
 - `signals://triggered` — recent alerts (JSON)
 - `signals://watchlist` — tickers (JSON)
-- `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought`)
+- `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought` | `golden_cross` | `macd_bullish_crossover` | `pct_from_ma`)
+
+Forward-return charts show a price panel with historical signal markers plus a summary table. Default horizons are 21, 42, 63, 84, 105, 126, and 252 daily trading bars. `chart_forward_returns` accepts optional `event_params`; for `pct_from_ma`, pass values such as `{"ma_type":"ema","ma_period":200,"pct":3}`.
 
 ## Connecting to the SQLite DB
 

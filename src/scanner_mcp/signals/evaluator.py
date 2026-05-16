@@ -9,6 +9,7 @@ import pandas as pd
 
 from scanner_mcp.indicators import ta
 from scanner_mcp.indicators.core import Indicators
+from scanner_mcp.signals import calculations as calc
 from scanner_mcp.signals.catalog import merge_params
 from scanner_mcp.signals.models import ActiveSignal
 
@@ -65,21 +66,23 @@ def _cross_sma(
     """Detect a latest-bar fast/slow SMA crossover."""
     if len(close) < slow + 2:
         return False, {"reason": "insufficient_bars", "need": slow + 2}
-    a = ta.sma(close, length=fast)
-    b = ta.sma(close, length=slow)
+    _, a = calc.moving_average(close, fast, "sma")
+    _, b = calc.moving_average(close, slow, "sma")
     if a is None or b is None or a.empty or b.empty:
         return False, {"reason": "sma_fail"}
-    a0, a1 = a.iloc[-1], a.iloc[-2]
-    b0, b1 = b.iloc[-1], b.iloc[-2]
-    if any(pd.isna(x) for x in (a0, a1, b0, b1)):
+    vals = calc.latest_cross_values(a, b)
+    if vals is None:
         return False, {"reason": "nan"}
-    if bullish:
-        trig = a1 <= b1 and a0 > b0
-    else:
-        trig = a1 >= b1 and a0 < b0
+    trig = calc.crossed(
+        vals.lhs_prev,
+        vals.lhs_cur,
+        vals.rhs_prev,
+        vals.rhs_cur,
+        "bullish" if bullish else "bearish",
+    )
     return trig, {
-        f"sma_{fast}": float(a0),
-        f"sma_{slow}": float(b0),
+        f"sma_{fast}": vals.lhs_cur,
+        f"sma_{slow}": vals.rhs_cur,
     }
 
 
@@ -87,27 +90,25 @@ def _cross_macd(
     close: pd.Series, p: dict[str, Any], bullish: bool
 ) -> tuple[bool, dict[str, Any]]:
     """Detect a latest-bar MACD/signal line crossover."""
-    out = ta.macd(close, fast=p["fast"], slow=p["slow"], signal=p["signal"])
-    if out is None or out.empty or len(out) < 2:
+    macd = calc.macd(close, fast=int(p["fast"]), slow=int(p["slow"]), signal=int(p["signal"]))
+    if macd is None:
         return False, {"reason": "macd_fail"}
-    try:
-        macd_col = next(
-            c
-            for c in out.columns
-            if c.startswith("MACD_") and not c.startswith("MACDs") and not c.startswith("MACDh")
-        )
-        sig_col = next(c for c in out.columns if c.startswith("MACDs_"))
-    except StopIteration:
+    out, cols = macd
+    if len(out) < 2:
+        return False, {"reason": "macd_fail"}
+    if cols is None:
         return False, {"reason": "macd_col"}
-    m0, m1 = out[macd_col].iloc[-1], out[macd_col].iloc[-2]
-    s0, s1 = out[sig_col].iloc[-1], out[sig_col].iloc[-2]
-    if any(pd.isna(x) for x in (m0, m1, s0, s1)):
+    vals = calc.latest_cross_values(out[cols.macd], out[cols.signal])
+    if vals is None:
         return False, {"reason": "nan"}
-    if bullish:
-        trig = m1 <= s1 and m0 > s0
-    else:
-        trig = m1 >= s1 and m0 < s0
-    return trig, {"macd": float(m0), "signal": float(s0)}
+    trig = calc.crossed(
+        vals.lhs_prev,
+        vals.lhs_cur,
+        vals.rhs_prev,
+        vals.rhs_cur,
+        "bullish" if bullish else "bearish",
+    )
+    return trig, {"macd": vals.lhs_cur, "signal": vals.rhs_cur}
 
 
 def _rsi_threshold(
@@ -129,19 +130,16 @@ def _pct_from_ma(close: pd.Series, p: dict[str, Any]) -> tuple[bool, dict[str, A
     n = int(p["ma_period"])
     if len(close) < n + 1:
         return False, {"reason": "insufficient_bars"}
-    if p.get("ma_type", "sma") == "ema":
-        line = ta.ema(close, length=n)
-    else:
-        line = ta.sma(close, length=n)
+    ma_type, line = calc.moving_average(close, n, str(p.get("ma_type", "sma")))
     if line is None or line.empty:
         return False, {"reason": "ma_fail"}
     pr = float(close.iloc[-1])
     ma = float(line.iloc[-1])
     if ma == 0 or pd.isna(ma):
         return False, {"reason": "ma_nan"}
-    diff = abs(pr - ma) / abs(ma) * 100.0
+    diff = float(calc.pct_distance_from_ma(close, line).iloc[-1])
     trig = diff <= float(p["pct"])
-    return trig, {"price": pr, f'{p.get("ma_type", "sma")}_{n}': ma, "diff_pct": diff}
+    return trig, {"price": pr, f"{ma_type}_{n}": ma, "diff_pct": diff}
 
 
 def _pct_from_ath(df: pd.DataFrame, min_pct: float) -> tuple[bool, dict[str, Any]]:
