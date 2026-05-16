@@ -812,7 +812,7 @@ def chart_fundamental_overlay(
 
     `symbol`: yfinance ticker.
     `metric`: `revenue` uses Total Revenue; `earnings` uses Net Income.
-    `frequency`: annual by default for longer history; quarterly is usually limited by Yahoo to recent quarters.
+    `frequency`: quarterly by default (although limited historical data by Yahoo data availability); annual uses fiscal-year statements.
     Returns PNG image; on failure JSON text with `error`.
     """
     return _chart_tool_result(
