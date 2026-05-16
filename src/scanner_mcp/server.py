@@ -761,16 +761,39 @@ def chart_price_overlay(
 @mcp.tool()
 def chart_forward_returns(
     symbol: str = "SPY",
-    event_type: Literal["rsi_oversold", "rsi_overbought"] = "rsi_oversold",
+    event_type: Literal[
+        "golden_cross",
+        "macd_bullish_crossover",
+        "pct_from_ma",
+        "rsi_oversold",
+        "rsi_overbought",
+    ] = "rsi_oversold",
     windows: list[int] | None = None,
+    event_params: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "Optional event detector parameters. For pct_from_ma, use "
+                '{"ma_type":"ema","ma_period":200,"pct":3}.'
+            )
+        ),
+    ] = None,
 ) -> Image | str:
-    """Histograms of forward returns after RSI events (~10y daily history; `period` not configurable).
+    """Price chart with signal markers plus a forward-return table after historical signal events.
 
-    `windows`: forward horizons in **days** along the daily close series (default 7, 30, 90, 180).
+    Uses ~10y daily history; `period` is not configurable.
+    `windows`: forward horizons in **trading bars** along the daily close series
+    (default 5, 10, 21, 42, 63, 126, 252; about 1-6 and 12 months).
+    Supported `event_type`: rsi_oversold, rsi_overbought, golden_cross,
+    macd_bullish_crossover, pct_from_ma.
+    `event_params`: optional event-specific detector parameters. For `pct_from_ma`,
+    supported keys are `ma_type` ("sma" or "ema"), `ma_period`, and `pct`.
     """
     p: dict[str, Any] = {"symbol": symbol, "event_type": event_type}
     if windows is not None:
         p["windows"] = windows
+    if event_params is not None:
+        p["event_params"] = event_params
     return _chart_tool_result("forward_returns", p)
 
 

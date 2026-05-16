@@ -62,6 +62,12 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 - Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
 - Charts (typed args): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle` — each uses `_chart_tool_result`, which on success returns a FastMCP `Image` (`Image(data=base64.b64decode(...))`: raw PNG bytes wrapped for an MCP image block). On failure it returns JSON text with an `error` field.
 
+## Unit tests
+Run unit tests for the entire repo using:
+```bash
+python3 -m pytest
+```
+
 ## Local tool testing
 
 Use `test.py` to smoke-test tools directly from the repo without starting an MCP client. Run it from the project root after setup:
@@ -112,7 +118,9 @@ npx @modelcontextprotocol/inspector scanner-mcp
 
 - `signals://triggered` — recent alerts (JSON)
 - `signals://watchlist` — tickers (JSON)
-- `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought`)
+- `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought` | `golden_cross` | `macd_bullish_crossover` | `pct_from_ma`)
+
+Forward-return charts show a price panel with historical signal markers plus a summary table. Default horizons are 21, 42, 63, 84, 105, 126, and 252 daily trading bars. `chart_forward_returns` accepts optional `event_params`; for `pct_from_ma`, pass values such as `{"ma_type":"ema","ma_period":200,"pct":3}`.
 
 ## Connecting to the SQLite DB
 

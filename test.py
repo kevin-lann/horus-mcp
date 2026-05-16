@@ -105,7 +105,6 @@ def _chart_tool_call(args: argparse.Namespace) -> Image | str:
         kw = {
             "symbol": args.symbol,
             "event_type": "rsi_oversold",
-            "windows": [7, 30, 90],
         }
         if args.chart_params:
             kw.update(json.loads(args.chart_params))
