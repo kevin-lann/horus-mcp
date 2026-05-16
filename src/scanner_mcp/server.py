@@ -737,6 +737,19 @@ def chart_price_history(
     symbol: str = "SPY",
     period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
     interval: Annotated[str, Field(description="yfinance bar size (e.g. 1d, 1h); intraday couples to allowed period ranges")] = "1d",
+    show_ma: Annotated[bool, Field(description="Overlay a simple moving average.")] = False,
+    ma_period: Annotated[int, Field(description="SMA period used when show_ma is true.")] = 50,
+    show_bollinger_bands: Annotated[bool, Field(description="Overlay Bollinger Bands.")] = False,
+    bb_period: Annotated[int, Field(description="Bollinger Band moving-average period.")] = 20,
+    bb_std: Annotated[float, Field(description="Bollinger Band standard-deviation multiplier.")] = 2.0,
+    show_ema: Annotated[bool, Field(description="Overlay an exponential moving average.")] = False,
+    ema_period: Annotated[int, Field(description="EMA period used when show_ema is true.")] = 21,
+    show_ma_cloud: Annotated[bool, Field(description="Overlay a filled SMA cloud between fast and slow averages.")] = False,
+    ma_cloud_fast: Annotated[int, Field(description="Fast SMA period used for the MA cloud.")] = 50,
+    ma_cloud_slow: Annotated[int, Field(description="Slow SMA period used for the MA cloud.")] = 200,
+    show_fib_retracement: Annotated[bool, Field(description="Overlay Fibonacci retracement levels from the visible high/low swing.")] = False,
+    show_avwap: Annotated[bool, Field(description="Overlay anchored VWAP from the first visible bar, or avwap_anchor when provided.")] = False,
+    avwap_anchor: Annotated[str | None, Field(description="Optional aVWAP anchor date/time parseable by pandas, for example 2025-01-02.")] = None,
     pe_subchart: Annotated[
         bool,
         Field(
@@ -751,7 +764,25 @@ def chart_price_history(
     """Candlestick price history chart. Returns PNG image; on failure JSON text with `error`."""
     return _chart_tool_result(
         "price_history",
-        {"symbol": symbol, "period": period, "interval": interval, "pe_subchart": pe_subchart},
+        {
+            "symbol": symbol,
+            "period": period,
+            "interval": interval,
+            "show_ma": show_ma,
+            "ma_period": ma_period,
+            "show_bollinger_bands": show_bollinger_bands,
+            "bb_period": bb_period,
+            "bb_std": bb_std,
+            "show_ema": show_ema,
+            "ema_period": ema_period,
+            "show_ma_cloud": show_ma_cloud,
+            "ma_cloud_fast": ma_cloud_fast,
+            "ma_cloud_slow": ma_cloud_slow,
+            "show_fib_retracement": show_fib_retracement,
+            "show_avwap": show_avwap,
+            "avwap_anchor": avwap_anchor,
+            "pe_subchart": pe_subchart,
+        },
     )
 
 
