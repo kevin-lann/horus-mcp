@@ -45,6 +45,23 @@ class ChartGeneratorTest(unittest.TestCase):
         self.assertEqual(pe.iloc[1], 10.0)
         self.assertTrue(pd.isna(pe.iloc[2]))
 
+    def test_statement_metric_series_extracts_revenue_and_earnings(self) -> None:
+        stmt = pd.DataFrame(
+            {
+                pd.Timestamp("2024-12-31"): [100.0, 30.0],
+                pd.Timestamp("2023-12-31"): [90.0, 25.0],
+            },
+            index=["Total Revenue", "Net Income"],
+        )
+
+        revenue = generator._statement_metric_series(stmt, "revenue")
+        earnings = generator._statement_metric_series(stmt, "earnings")
+
+        self.assertEqual(list(revenue), [90.0, 100.0])
+        self.assertEqual(list(earnings), [25.0, 30.0])
+        with self.assertRaises(ValueError):
+            generator._statement_metric_series(stmt, "cashflow")
+
     def test_anchored_vwap_respects_anchor_and_zero_volume(self) -> None:
         df = pd.DataFrame(
             {
@@ -72,6 +89,43 @@ class ChartGeneratorTest(unittest.TestCase):
             self.assertEqual(generator._log_cycle(provider, {"symbol": "BTC-USD", "period": "max"})["data"], "pngdata")
 
         self.assertEqual(render.call_count, 3)
+
+    def test_fundamental_overlay_fetches_statement_bars(self) -> None:
+        price = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0, 13.0],
+                "High": [11.0, 12.0, 13.0, 14.0],
+                "Low": [9.0, 10.0, 11.0, 12.0],
+                "Close": [10.5, 11.5, 12.5, 13.5],
+            },
+            index=pd.to_datetime(["2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]),
+        )
+        stmt = pd.DataFrame(
+            {
+                pd.Timestamp("2024-09-30"): [300.0, 80.0],
+                pd.Timestamp("2024-06-30"): [250.0, 70.0],
+            },
+            index=["Total Revenue", "Net Income"],
+        )
+
+        class FakeTicker:
+            quarterly_incomestmt = stmt
+            incomestmt = stmt
+
+        def fake_render(fig, chart_type: str) -> str:
+            self.assertEqual(chart_type, "fundamental_overlay")
+            self.assertEqual(fig.data[0].name, "Annual Revenue")
+            self.assertEqual(fig.data[1].name, "XYZ")
+            return "pngdata"
+
+        provider = FakeProvider({"XYZ": price})
+        with (
+            patch("yfinance.Ticker", return_value=FakeTicker()),
+            patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render),
+        ):
+            result = generator._fundamental_overlay(provider, {"symbol": "XYZ", "metric": "revenue", "period": "1y"})
+
+        self.assertEqual(result["data"], "pngdata")
 
     def test_price_history_adds_requested_overlays(self) -> None:
         df = pd.DataFrame(
