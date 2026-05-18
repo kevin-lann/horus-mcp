@@ -754,9 +754,8 @@ def chart_price_history(
         bool,
         Field(
             description=(
-                "When true, add a lower panel for P/E vs EPS: quarterly TTM where Yahoo provides "
-                "enough quarters, otherwise fiscal-year Diluted EPS (Yahoo caps statement history; "
-                "ETFs often have no EPS)."
+                "When true, add a lower panel for P/E history: Alpha Vantage EPS history when configured, "
+                "otherwise Yahoo EPS-derived quarterly TTM or fiscal-year P/E fallback."
             )
         ),
     ] = False,
@@ -812,7 +811,7 @@ def chart_fundamental_overlay(
 
     `symbol`: yfinance ticker.
     `metric`: `revenue` uses Total Revenue; `earnings` uses Net Income.
-    `frequency`: quarterly by default (although limited historical data by Yahoo data availability); annual uses fiscal-year statements.
+    `frequency`: quarterly by default; uses Alpha Vantage historical statements when configured, with Yahoo statement fallback.
     Returns PNG image; on failure JSON text with `error`.
     """
     return _chart_tool_result(

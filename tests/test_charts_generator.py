@@ -14,10 +14,18 @@ class FakeProvider:
     def __init__(self, frames: dict[str, pd.DataFrame]) -> None:
         self.frames = frames
         self.calls: list[tuple[str, str, str]] = []
+        self.fundamentals = pd.Series(dtype=float)
+        self.pe = pd.Series(dtype=float)
 
     def get_history(self, symbol: str, *, period: str, interval: str) -> pd.DataFrame:
         self.calls.append((symbol, period, interval))
         return self.frames.get(symbol, pd.DataFrame())
+
+    def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
+        return self.fundamentals
+
+    def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+        return self.pe
 
 
 class ChartGeneratorTest(unittest.TestCase):
@@ -100,29 +108,23 @@ class ChartGeneratorTest(unittest.TestCase):
             },
             index=pd.to_datetime(["2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]),
         )
-        stmt = pd.DataFrame(
-            {
-                pd.Timestamp("2024-09-30"): [300.0, 80.0],
-                pd.Timestamp("2024-06-30"): [250.0, 70.0],
-            },
-            index=["Total Revenue", "Net Income"],
+        fundamentals = pd.Series(
+            [250_000_000_000.0, 300_000_000_000.0],
+            index=pd.to_datetime(["2024-06-30", "2024-09-30"]),
+            dtype=float,
         )
-
-        class FakeTicker:
-            quarterly_incomestmt = stmt
-            incomestmt = stmt
+        fundamentals.attrs["source"] = "Alpha Vantage"
 
         def fake_render(fig, chart_type: str) -> str:
             self.assertEqual(chart_type, "fundamental_overlay")
-            self.assertEqual(fig.data[0].name, "Quarterly Revenue")
+            self.assertEqual(fig.data[0].name, "Quarterly Revenue (Alpha Vantage)")
             self.assertEqual(fig.data[1].name, "XYZ")
+            self.assertIn("300B", fig.layout.yaxis2.ticktext)
             return "pngdata"
 
         provider = FakeProvider({"XYZ": price})
-        with (
-            patch("yfinance.Ticker", return_value=FakeTicker()),
-            patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render),
-        ):
+        provider.fundamentals = fundamentals
+        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
             result = generator._fundamental_overlay(provider, {"symbol": "XYZ", "metric": "revenue", "period": "1y"})
 
         self.assertEqual(result["data"], "pngdata")
