@@ -11,7 +11,12 @@ import pandas as pd
 
 from scanner_mcp.data.cache import TTLCache
 from scanner_mcp.data import exchange_universe, movers
-from scanner_mcp.data.provider import YFinanceProvider, _merge_asof_price_over_eps
+from scanner_mcp.data.provider import (
+    AlphaVantageProvider,
+    CompositeDataProvider,
+    YFinanceProvider,
+    _merge_asof_price_over_eps,
+)
 
 
 class FakeHTTPResponse:
@@ -93,6 +98,30 @@ class YFinanceProviderTest(unittest.TestCase):
         self.assertEqual(chain["expiries"], ["2024-01-19", "2024-02-16"])
         self.assertFalse(chain["calls"].empty)
 
+    def test_yfinance_fundamentals_use_only_yahoo_statements(self) -> None:
+        stmt = pd.DataFrame(
+            {
+                pd.Timestamp("2024-03-31"): [100.0, 10.0],
+                pd.Timestamp("2023-12-31"): [90.0, 9.0],
+            },
+            index=["Total Revenue", "Net Income"],
+        )
+
+        class FakeTicker:
+            def __init__(self, _symbol: str) -> None:
+                self.quarterly_incomestmt = stmt
+                self.incomestmt = stmt
+
+        with (
+            patch("scanner_mcp.data.provider.yf.Ticker", FakeTicker),
+            patch("scanner_mcp.data.provider.httpx.get") as http_get,
+        ):
+            revenue = YFinanceProvider().get_fundamental_series("AAPL", "revenue", "quarterly")
+
+        self.assertEqual(list(revenue), [90.0, 100.0])
+        self.assertEqual(revenue.attrs["source"], "Yahoo")
+        http_get.assert_not_called()
+
     def test_alpha_vantage_income_statement_series_parses_quarterly_and_annual_rows(self) -> None:
         calls: list[dict[str, object]] = []
 
@@ -116,7 +145,7 @@ class YFinanceProviderTest(unittest.TestCase):
             patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": "test-key"}),
             patch("scanner_mcp.data.provider.httpx.get", side_effect=fake_get),
         ):
-            provider = YFinanceProvider()
+            provider = AlphaVantageProvider()
             quarterly = provider.get_fundamental_series("aapl", "revenue", "quarterly")
             annual = provider.get_fundamental_series("aapl", "earnings", "annual")
 
@@ -131,7 +160,7 @@ class YFinanceProviderTest(unittest.TestCase):
             patch("scanner_mcp.data.provider._ENV_FILE_PATH", Path("/tmp/missing-scanner-mcp-env")),
             patch("scanner_mcp.data.provider.httpx.get") as http_get,
         ):
-            provider = YFinanceProvider()
+            provider = AlphaVantageProvider()
             series = provider._alpha_vantage_income_statement_series("AAPL", "revenue", "quarterly")
 
         self.assertTrue(series.empty)
@@ -145,7 +174,7 @@ class YFinanceProviderTest(unittest.TestCase):
                 patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": ""}, clear=True),
                 patch("scanner_mcp.data.provider._ENV_FILE_PATH", env_path),
             ):
-                self.assertEqual(YFinanceProvider()._alpha_vantage_api_key(), "file-key")
+                self.assertEqual(AlphaVantageProvider()._alpha_vantage_api_key(), "file-key")
 
     def test_historical_pe_prefers_alpha_vantage_earnings_before_yahoo_fallback(self) -> None:
         close = pd.Series(
@@ -174,12 +203,65 @@ class YFinanceProviderTest(unittest.TestCase):
             patch("scanner_mcp.data.provider.httpx.get", side_effect=fake_get),
             patch("scanner_mcp.data.provider.yf.Ticker", side_effect=AssertionError("Yahoo fallback should not be used")),
         ):
-            pe = YFinanceProvider().get_historical_pe_series("AAPL", close)
+            pe = AlphaVantageProvider().get_historical_pe_series("AAPL", close)
 
         self.assertTrue(pd.isna(pe.iloc[0]))
         self.assertEqual(float(pe.iloc[1]), 30.0)
         self.assertEqual(float(pe.iloc[2]), 150.0 / 4.5)
         self.assertEqual(pe.attrs["source"], "Alpha Vantage EPS")
+
+    def test_composite_prefers_first_non_empty_fundamentals_provider(self) -> None:
+        empty = pd.Series(dtype=float)
+        alpha = pd.Series([1.0], index=pd.to_datetime(["2024-01-01"]))
+        alpha.attrs["source"] = "Alpha"
+        yahoo = pd.Series([2.0], index=pd.to_datetime(["2024-01-01"]))
+        yahoo.attrs["source"] = "Yahoo"
+
+        class FakeFundamentals:
+            def __init__(self, series: pd.Series) -> None:
+                self.series = series
+
+            def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
+                return self.series
+
+            def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+                return self.series
+
+        provider = CompositeDataProvider(object(), [FakeFundamentals(empty), FakeFundamentals(alpha), FakeFundamentals(yahoo)])  # type: ignore[arg-type]
+
+        out = provider.get_fundamental_series("AAPL", "revenue", "quarterly")
+
+        self.assertEqual(list(out), [1.0])
+        self.assertEqual(out.attrs["source"], "Alpha")
+
+    def test_composite_pe_returns_first_finite_series_or_last_fallback(self) -> None:
+        close = pd.Series([10.0], index=pd.to_datetime(["2024-01-01"]))
+        nan_series = pd.Series([float("nan")], index=close.index)
+        nan_series.attrs["source"] = "Yahoo EPS fallback"
+        finite_series = pd.Series([20.0], index=close.index)
+        finite_series.attrs["source"] = "Alpha Vantage EPS"
+
+        class FakeFundamentals:
+            def __init__(self, series: pd.Series) -> None:
+                self.series = series
+
+            def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
+                return pd.Series(dtype=float)
+
+            def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+                return self.series
+
+        provider = CompositeDataProvider(object(), [FakeFundamentals(nan_series), FakeFundamentals(finite_series)])  # type: ignore[arg-type]
+        out = provider.get_historical_pe_series("AAPL", close)
+
+        self.assertEqual(list(out), [20.0])
+        self.assertEqual(out.attrs["source"], "Alpha Vantage EPS")
+
+        fallback_provider = CompositeDataProvider(object(), [FakeFundamentals(nan_series)])  # type: ignore[arg-type]
+        fallback = fallback_provider.get_historical_pe_series("AAPL", close)
+
+        self.assertTrue(pd.isna(fallback.iloc[0]))
+        self.assertEqual(fallback.attrs["source"], "Yahoo EPS fallback")
 
     def test_pe_merge_normalizes_mixed_datetime_resolutions(self) -> None:
         close = pd.Series(

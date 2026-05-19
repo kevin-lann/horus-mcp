@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import DataProvider
 from scanner_mcp.indicators import ta
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 
@@ -47,7 +47,7 @@ def _fig_to_b64(fig: go.Figure, chart_type: str) -> str:
 
 
 def generate_chart(
-    provider: YFinanceProvider,
+    provider: DataProvider,
     chart_type: str,
     params: dict[str, Any],
 ) -> dict[str, str]:
@@ -108,7 +108,7 @@ def _merge_asof_price_over_eps(
     return pe_sorted.reindex(close.index)
 
 
-def _trailing_pe_series(provider: YFinanceProvider, symbol: str, close: pd.Series) -> pd.Series:
+def _trailing_pe_series(provider: DataProvider, symbol: str, close: pd.Series) -> pd.Series:
     """P/E aligned to `close`, provided by the configured data provider."""
     return provider.get_historical_pe_series(str(symbol), close)
 
@@ -450,7 +450,7 @@ def _apply_fib_x_padding(fig: go.Figure, df: pd.DataFrame, p: dict[str, Any], ro
         fig.update_xaxes(range=x_range, row=row, col=1)
 
 
-def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _price_history(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
@@ -519,7 +519,7 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
 
-def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _price_overlay(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Plot multiple symbols on one line chart, optionally normalized to 100."""
     syms: list = p.get("symbols") or ["SPY", "QQQ"]
     period = p.get("period", "1y")
@@ -567,7 +567,7 @@ def _large_axis_tick_values(values: pd.Series) -> tuple[list[float], list[str]]:
     return [float(v) for v in ticks], [_format_large_axis(float(v)) for v in ticks]
 
 
-def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _fundamental_overlay(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Overlay price history with revenue or earnings bars from income statements."""
     sym = str(p.get("symbol", "AAPL")).strip().upper()
     period = p.get("period", "5y")
@@ -658,7 +658,7 @@ def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
     return {"mime": "image/png", "data": _fig_to_b64(fig, "fundamental_overlay")}
 
 
-def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _forward_returns_chart(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Build a price/event chart plus forward-return summary table."""
     from scanner_mcp.research.forward_returns import (  # local import
         DEFAULT_FORWARD_WINDOWS,
@@ -947,7 +947,7 @@ def _mix_rgb(start: tuple[int, int, int], end: tuple[int, int, int], weight: flo
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
-def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _drawdown_comparison(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Compare percentage drawdowns from each symbol's running high."""
     syms: list = p.get("symbols") or ["^GSPC", "QQQ"]
     period = p.get("period", "5y")
@@ -964,7 +964,7 @@ def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
     return {"mime": "image/png", "data": _fig_to_b64(fig, "drawdown_comparison")}
 
 
-def _log_cycle(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _log_cycle(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Plot weekly log10 close values for long-cycle price inspection."""
     sym = str(p.get("symbol", "BTC-USD"))
     period = p.get("period", "max")

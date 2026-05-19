@@ -25,7 +25,21 @@ _ALPHA_VANTAGE_API_KEY_ENV = "ALPHA_VANTAGE_API_KEY"
 _ENV_FILE_PATH = Path(__file__).resolve().parents[3] / ".env"
 
 
-class DataProvider(ABC):
+class FundamentalsProvider(ABC):
+    """Interface for historical fundamentals and valuation data."""
+
+    @abstractmethod
+    def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        """Return revenue or earnings history indexed by statement date."""
+        ...
+
+    @abstractmethod
+    def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        """Return P/E history aligned to a close-price series."""
+        ...
+
+
+class DataProvider(FundamentalsProvider, ABC):
     """Interface used by tools, charts, and scans to fetch market data."""
 
     @abstractmethod
@@ -47,16 +61,6 @@ class DataProvider(ABC):
     @abstractmethod
     def get_option_chain(self, symbol: str, expiry: str | None) -> dict[str, Any]:
         """Return option chain frames and expiries, or an error dictionary."""
-        ...
-
-    @abstractmethod
-    def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
-        """Return revenue or earnings history indexed by statement date."""
-        ...
-
-    @abstractmethod
-    def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        """Return P/E history aligned to a close-price series."""
         ...
 
 
@@ -179,12 +183,11 @@ def _statement_metric_series(stmt: pd.DataFrame, metric: str) -> pd.Series:
 
 
 class YFinanceProvider(DataProvider):
-    """YFinance-backed provider with Alpha Vantage fundamentals and caching."""
+    """YFinance-backed provider for market data and Yahoo fundamentals fallback."""
 
     def __init__(self) -> None:
         self._cache: TTLCache[Any] = TTLCache(300.0)
         self._hist_cache: TTLCache[pd.DataFrame] = TTLCache(_HISTORY_DAILY_TTL)
-        self._fundamentals_cache: TTLCache[pd.Series] = TTLCache(_FUNDAMENTALS_TTL)
 
     def get_history(
         self,
@@ -258,24 +261,89 @@ class YFinanceProvider(DataProvider):
         }
 
     def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
-        """Fetch revenue or earnings history, preferring Alpha Vantage and falling back to Yahoo."""
+        """Fetch revenue or earnings history from Yahoo statements."""
         metric_key = str(metric).strip().lower()
         if metric_key not in {"revenue", "earnings"}:
             raise ValueError("metric must be revenue or earnings")
-        alpha_vantage = self._alpha_vantage_income_statement_series(symbol, metric_key, frequency)
-        if not alpha_vantage.empty:
-            return alpha_vantage
         return self._yahoo_fundamental_series(symbol, metric_key, frequency)
 
     def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        """Fetch historical P/E from Alpha Vantage EPS, falling back to Yahoo EPS-derived P/E."""
-        pe = self._alpha_vantage_historical_pe_series(symbol, close, "quarterly")
-        if not pe.empty and np.isfinite(pe.to_numpy(dtype=float)).any():
-            return pe
-        pe = self._alpha_vantage_historical_pe_series(symbol, close, "annual")
-        if not pe.empty and np.isfinite(pe.to_numpy(dtype=float)).any():
-            return pe
+        """Fetch Yahoo EPS-derived historical P/E."""
         return self._yahoo_historical_pe_series(symbol, close)
+
+    def _yahoo_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        sym = symbol.strip().upper()
+        freq = str(frequency).strip().lower()
+        ticker = yf.Ticker(sym)
+        try:
+            if freq in {"annual", "yearly", "year"}:
+                stmt = ticker.incomestmt
+            elif freq in {"quarterly", "quarter", "q"}:
+                stmt = ticker.quarterly_incomestmt
+            else:
+                raise ValueError("frequency must be quarterly or annual")
+        except Exception as e:  # noqa: BLE001
+            log.exception("Yahoo income statement failed %s %s: %s", sym, frequency, e)
+            return _empty_series()
+        out = _statement_metric_series(stmt, metric)
+        return _source_series(out, "Yahoo") if not out.empty else out
+
+    def _yahoo_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        pe_q = self._yahoo_quarterly_ttm_pe_series(symbol, close)
+        pe_a = self._yahoo_annual_fy_eps_pe_series(symbol, close)
+        out = pe_q.combine_first(pe_a)
+        return _source_series(out, "Yahoo EPS fallback")
+
+    def _yahoo_quarterly_ttm_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        sym = symbol.strip().upper()
+        try:
+            stmt = yf.Ticker(sym).quarterly_incomestmt
+        except Exception as e:  # noqa: BLE001
+            log.exception("Yahoo quarterly income statement failed %s: %s", sym, e)
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        if stmt is None or stmt.empty:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        if "Diluted EPS" in stmt.index:
+            qeps = stmt.loc["Diluted EPS"]
+        elif "Basic EPS" in stmt.index:
+            qeps = stmt.loc["Basic EPS"]
+        else:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        qeps = qeps.dropna().sort_index().astype(float)
+        if len(qeps) < 4:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        ttm = qeps.rolling(window=4, min_periods=4).sum().dropna()
+        if ttm.empty:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
+
+    def _yahoo_annual_fy_eps_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        sym = symbol.strip().upper()
+        try:
+            stmt = yf.Ticker(sym).incomestmt
+        except Exception as e:  # noqa: BLE001
+            log.exception("Yahoo annual income statement failed %s: %s", sym, e)
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        if stmt is None or stmt.empty:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        if "Diluted EPS" in stmt.index:
+            fy = stmt.loc["Diluted EPS"]
+        elif "Basic EPS" in stmt.index:
+            fy = stmt.loc["Basic EPS"]
+        else:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        fy = fy.dropna().sort_index().astype(float)
+        if fy.empty:
+            return pd.Series(np.nan, index=close.index, dtype=float)
+        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
+
+
+class AlphaVantageProvider(FundamentalsProvider):
+    """Alpha Vantage-backed provider for historical fundamentals."""
+
+    def __init__(self) -> None:
+        self._cache: TTLCache[Any] = TTLCache(_FUNDAMENTALS_TTL)
+        self._fundamentals_cache: TTLCache[pd.Series] = TTLCache(_FUNDAMENTALS_TTL)
 
     def _alpha_vantage_api_key(self) -> str | None:
         key = os.environ.get(_ALPHA_VANTAGE_API_KEY_ENV)
@@ -350,68 +418,64 @@ class YFinanceProvider(DataProvider):
         pe = _merge_asof_price_over_eps(close, pd.DatetimeIndex(eps.index), eps.to_numpy(dtype=float))
         return _source_series(pe, "Alpha Vantage EPS")
 
-    def _yahoo_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
-        sym = symbol.strip().upper()
-        freq = str(frequency).strip().lower()
-        ticker = yf.Ticker(sym)
-        try:
-            if freq in {"annual", "yearly", "year"}:
-                stmt = ticker.incomestmt
-            elif freq in {"quarterly", "quarter", "q"}:
-                stmt = ticker.quarterly_incomestmt
-            else:
-                raise ValueError("frequency must be quarterly or annual")
-        except Exception as e:  # noqa: BLE001
-            log.exception("Yahoo income statement failed %s %s: %s", sym, frequency, e)
-            return _empty_series()
-        out = _statement_metric_series(stmt, metric)
-        return _source_series(out, "Yahoo") if not out.empty else out
+    def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        metric_key = str(metric).strip().lower()
+        if metric_key not in {"revenue", "earnings"}:
+            raise ValueError("metric must be revenue or earnings")
+        return self._alpha_vantage_income_statement_series(symbol, metric_key, frequency)
 
-    def _yahoo_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        pe_q = self._yahoo_quarterly_ttm_pe_series(symbol, close)
-        pe_a = self._yahoo_annual_fy_eps_pe_series(symbol, close)
-        out = pe_q.combine_first(pe_a)
-        return _source_series(out, "Yahoo EPS fallback")
+    def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        pe = self._alpha_vantage_historical_pe_series(symbol, close, "quarterly")
+        if not pe.empty and np.isfinite(pe.to_numpy(dtype=float)).any():
+            return pe
+        return self._alpha_vantage_historical_pe_series(symbol, close, "annual")
 
-    def _yahoo_quarterly_ttm_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        sym = symbol.strip().upper()
-        try:
-            stmt = yf.Ticker(sym).quarterly_incomestmt
-        except Exception as e:  # noqa: BLE001
-            log.exception("Yahoo quarterly income statement failed %s: %s", sym, e)
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        if stmt is None or stmt.empty:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        if "Diluted EPS" in stmt.index:
-            qeps = stmt.loc["Diluted EPS"]
-        elif "Basic EPS" in stmt.index:
-            qeps = stmt.loc["Basic EPS"]
-        else:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        qeps = qeps.dropna().sort_index().astype(float)
-        if len(qeps) < 4:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        ttm = qeps.rolling(window=4, min_periods=4).sum().dropna()
-        if ttm.empty:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
 
-    def _yahoo_annual_fy_eps_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        sym = symbol.strip().upper()
-        try:
-            stmt = yf.Ticker(sym).incomestmt
-        except Exception as e:  # noqa: BLE001
-            log.exception("Yahoo annual income statement failed %s: %s", sym, e)
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        if stmt is None or stmt.empty:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        if "Diluted EPS" in stmt.index:
-            fy = stmt.loc["Diluted EPS"]
-        elif "Basic EPS" in stmt.index:
-            fy = stmt.loc["Basic EPS"]
-        else:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        fy = fy.dropna().sort_index().astype(float)
-        if fy.empty:
-            return pd.Series(np.nan, index=close.index, dtype=float)
-        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
+class CompositeDataProvider(DataProvider):
+    """App-facing provider that delegates market data and ordered fundamentals."""
+
+    def __init__(
+        self,
+        market_provider: DataProvider,
+        fundamentals_providers: list[FundamentalsProvider],
+    ) -> None:
+        self._market_provider = market_provider
+        self._fundamentals_providers = fundamentals_providers
+
+    @classmethod
+    def default(cls) -> CompositeDataProvider:
+        yahoo = YFinanceProvider()
+        return cls(yahoo, [AlphaVantageProvider(), yahoo])
+
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        period: str = "6mo",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        return self._market_provider.get_history(symbol, period=period, interval=interval)
+
+    def get_fast_info(self, symbol: str) -> dict[str, Any]:
+        return self._market_provider.get_fast_info(symbol)
+
+    def get_option_chain(self, symbol: str, expiry: str | None) -> dict[str, Any]:
+        return self._market_provider.get_option_chain(symbol, expiry)
+
+    def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        for provider in self._fundamentals_providers:
+            series = provider.get_fundamental_series(symbol, metric, frequency)
+            if not series.empty:
+                return series
+        return _empty_series()
+
+    def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
+        fallback = _empty_series()
+        for provider in self._fundamentals_providers:
+            series = provider.get_historical_pe_series(symbol, close)
+            if series.empty:
+                continue
+            if np.isfinite(series.to_numpy(dtype=float)).any():
+                return series
+            fallback = series
+        return fallback

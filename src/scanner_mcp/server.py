@@ -22,7 +22,7 @@ from fastmcp.utilities.types import Image
 from scanner_mcp.charts import generator as chartgen
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
 from scanner_mcp.data.movers import screen_movers
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import CompositeDataProvider, DataProvider
 from scanner_mcp.db.store import SignalRow, Store
 from scanner_mcp.indicators.core import Indicators, beta_from_returns
 from scanner_mcp.indicators import ratings
@@ -35,7 +35,7 @@ from scanner_mcp.signals.models import ActiveSignal
 log = logging.getLogger(__name__)
 
 _store: Store | None = None
-_provider: YFinanceProvider | None = None
+_provider: DataProvider | None = None
 _sched: BaseScheduler | None = None
 
 _EXCHANGES = frozenset({"NYSE", "NASDAQ", "AMEX", "CRYPTO"})
@@ -71,11 +71,11 @@ def _get_store() -> Store:
     return _store
 
 
-def _get_provider() -> YFinanceProvider:
+def _get_provider() -> DataProvider:
     """Lazily create the shared market data provider."""
     global _provider
     if _provider is None:
-        _provider = YFinanceProvider()
+        _provider = CompositeDataProvider.default()
     return _provider
 
 
@@ -223,7 +223,7 @@ def _first_present(data: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _quote_from_history(p: YFinanceProvider, symbol: str) -> dict[str, float | None]:
+def _quote_from_history(p: DataProvider, symbol: str) -> dict[str, float | None]:
     """Fallback quote calculation from recent daily closes."""
     df = p.get_history(symbol, period="10d", interval="1d")
     if df is None or df.empty or "Close" not in df.columns:
@@ -245,7 +245,7 @@ def _quote_from_history(p: YFinanceProvider, symbol: str) -> dict[str, float | N
     return {"last_price": last, "previous_close": prev, "day_change_pct": chg_pct}
 
 
-def _quote_snapshot(p: YFinanceProvider, symbol: str) -> dict[str, Any]:
+def _quote_snapshot(p: DataProvider, symbol: str) -> dict[str, Any]:
     """Resolve last price and daily change from fast_info with history fallback."""
     f = p.get_fast_info(symbol) or {}
     log.debug("quote snapshot fast_info %s keys=%s", symbol, sorted(f.keys()))
