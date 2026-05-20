@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
 
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import DataProvider
 from scanner_mcp.db.store import SignalRow, Store
 from scanner_mcp.notify.notifier import notify_desktop
 from scanner_mcp.signals.evaluator import evaluate
@@ -33,7 +33,7 @@ def _tickers_for_signal(srow: SignalRow, watch: list[str]) -> list[str]:
     return list(watch)
 
 
-def _scan_job(store: Store, provider: YFinanceProvider) -> None:
+def _scan_job(store: Store, provider: DataProvider) -> None:
     """APScheduler entrypoint that logs and swallows scan failures."""
     try:
         run_full_scan(store, provider, notify=True)
@@ -43,7 +43,7 @@ def _scan_job(store: Store, provider: YFinanceProvider) -> None:
 
 def run_full_scan(
     store: Store,
-    provider: YFinanceProvider,
+    provider: DataProvider,
     *,
     notify: bool = True,
 ) -> dict[str, Any]:
@@ -112,7 +112,7 @@ def run_full_scan(
 
 def start_scheduler(
     store: Store,
-    provider: YFinanceProvider,
+    provider: DataProvider,
 ) -> BackgroundScheduler:
     """Start the daily end-of-day scan scheduler.
 

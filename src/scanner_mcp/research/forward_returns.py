@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import DataProvider
 from scanner_mcp.signals import calculations as calc
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 
@@ -231,7 +231,7 @@ def compute_event_forward_study_from_history(
 
 
 def compute_event_forward_study(
-    provider: YFinanceProvider,
+    provider: DataProvider,
     symbol: str,
     event_type: str,
     windows: list[int] | None = None,
@@ -267,7 +267,7 @@ def summarize_forward_study(study: ForwardStudy) -> dict[int, dict[str, float | 
 
 
 def compute_event_forward_returns(
-    provider: YFinanceProvider,
+    provider: DataProvider,
     symbol: str,
     event_type: str,
     windows: list[int],
@@ -286,7 +286,7 @@ def compute_event_forward_returns(
 
 
 def forward_returns_markdown(
-    provider: YFinanceProvider,
+    provider: DataProvider,
     symbol: str,
     event_type: str,
 ) -> str:

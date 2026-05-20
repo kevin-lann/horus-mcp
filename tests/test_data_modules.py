@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -8,7 +11,23 @@ import pandas as pd
 
 from scanner_mcp.data.cache import TTLCache
 from scanner_mcp.data import exchange_universe, movers
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import (
+    AlphaVantageProvider,
+    CompositeDataProvider,
+    YFinanceProvider,
+    _merge_asof_price_over_eps,
+)
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self.payload
 
 
 class TTLCacheTest(unittest.TestCase):
@@ -78,6 +97,185 @@ class YFinanceProviderTest(unittest.TestCase):
 
         self.assertEqual(chain["expiries"], ["2024-01-19", "2024-02-16"])
         self.assertFalse(chain["calls"].empty)
+
+    def test_yfinance_fundamentals_use_only_yahoo_statements(self) -> None:
+        stmt = pd.DataFrame(
+            {
+                pd.Timestamp("2024-03-31"): [100.0, 10.0],
+                pd.Timestamp("2023-12-31"): [90.0, 9.0],
+            },
+            index=["Total Revenue", "Net Income"],
+        )
+
+        class FakeTicker:
+            def __init__(self, _symbol: str) -> None:
+                self.quarterly_incomestmt = stmt
+                self.incomestmt = stmt
+
+        with (
+            patch("scanner_mcp.data.provider.yf.Ticker", FakeTicker),
+            patch("scanner_mcp.data.provider.httpx.get") as http_get,
+        ):
+            revenue = YFinanceProvider().get_fundamental_series("AAPL", "revenue", "quarterly")
+
+        self.assertEqual(list(revenue), [90.0, 100.0])
+        self.assertEqual(revenue.attrs["source"], "Yahoo")
+        http_get.assert_not_called()
+
+    def test_alpha_vantage_income_statement_series_parses_quarterly_and_annual_rows(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_get(_url: str, *, params: dict[str, object], timeout: float) -> FakeHTTPResponse:
+            calls.append(params)
+            self.assertEqual(params["function"], "INCOME_STATEMENT")
+            return FakeHTTPResponse(
+                {
+                    "quarterlyReports": [
+                        {"fiscalDateEnding": "2024-03-31", "totalRevenue": "100", "netIncome": "10"},
+                        {"fiscalDateEnding": "2023-12-31", "totalRevenue": "90", "netIncome": "9"},
+                    ],
+                    "annualReports": [
+                        {"fiscalDateEnding": "2024-12-31", "totalRevenue": "500", "netIncome": "50"},
+                        {"fiscalDateEnding": "2023-12-31", "totalRevenue": "450", "netIncome": "45"},
+                    ]
+                }
+            )
+
+        with (
+            patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": "test-key"}),
+            patch("scanner_mcp.data.provider.httpx.get", side_effect=fake_get),
+        ):
+            provider = AlphaVantageProvider()
+            quarterly = provider.get_fundamental_series("aapl", "revenue", "quarterly")
+            annual = provider.get_fundamental_series("aapl", "earnings", "annual")
+
+        self.assertEqual(list(quarterly), [90.0, 100.0])
+        self.assertEqual(quarterly.attrs["source"], "Alpha Vantage")
+        self.assertEqual(list(annual), [45.0, 50.0])
+        self.assertEqual([call["symbol"] for call in calls], ["AAPL"])
+
+    def test_alpha_vantage_missing_api_key_returns_empty_without_http_request(self) -> None:
+        with (
+            patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": ""}, clear=True),
+            patch("scanner_mcp.data.provider._ENV_FILE_PATH", Path("/tmp/missing-scanner-mcp-env")),
+            patch("scanner_mcp.data.provider.httpx.get") as http_get,
+        ):
+            provider = AlphaVantageProvider()
+            series = provider._alpha_vantage_income_statement_series("AAPL", "revenue", "quarterly")
+
+        self.assertTrue(series.empty)
+        http_get.assert_not_called()
+
+    def test_alpha_vantage_api_key_can_be_read_from_root_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text("ALPHA_VANTAGE_API_KEY=file-key\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": ""}, clear=True),
+                patch("scanner_mcp.data.provider._ENV_FILE_PATH", env_path),
+            ):
+                self.assertEqual(AlphaVantageProvider()._alpha_vantage_api_key(), "file-key")
+
+    def test_historical_pe_prefers_alpha_vantage_earnings_before_yahoo_fallback(self) -> None:
+        close = pd.Series(
+            [100.0, 120.0, 150.0],
+            index=pd.to_datetime(["2024-01-02", "2024-04-02", "2024-07-02"]),
+            dtype=float,
+        )
+
+        def fake_get(_url: str, *, params: dict[str, object], timeout: float) -> FakeHTTPResponse:
+            self.assertEqual(timeout, 15.0)
+            self.assertEqual(params["function"], "EARNINGS")
+            return FakeHTTPResponse(
+                {
+                    "quarterlyEarnings": [
+                        {"fiscalDateEnding": "2024-06-30", "reportedEPS": "1.50"},
+                        {"fiscalDateEnding": "2024-03-31", "reportedEPS": "1.00"},
+                        {"fiscalDateEnding": "2023-12-31", "reportedEPS": "1.00"},
+                        {"fiscalDateEnding": "2023-09-30", "reportedEPS": "1.00"},
+                        {"fiscalDateEnding": "2023-06-30", "reportedEPS": "1.00"},
+                    ]
+                }
+            )
+
+        with (
+            patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": "test-key"}),
+            patch("scanner_mcp.data.provider.httpx.get", side_effect=fake_get),
+            patch("scanner_mcp.data.provider.yf.Ticker", side_effect=AssertionError("Yahoo fallback should not be used")),
+        ):
+            pe = AlphaVantageProvider().get_historical_pe_series("AAPL", close)
+
+        self.assertTrue(pd.isna(pe.iloc[0]))
+        self.assertEqual(float(pe.iloc[1]), 30.0)
+        self.assertEqual(float(pe.iloc[2]), 150.0 / 4.5)
+        self.assertEqual(pe.attrs["source"], "Alpha Vantage EPS")
+
+    def test_composite_prefers_first_non_empty_fundamentals_provider(self) -> None:
+        empty = pd.Series(dtype=float)
+        alpha = pd.Series([1.0], index=pd.to_datetime(["2024-01-01"]))
+        alpha.attrs["source"] = "Alpha"
+        yahoo = pd.Series([2.0], index=pd.to_datetime(["2024-01-01"]))
+        yahoo.attrs["source"] = "Yahoo"
+
+        class FakeFundamentals:
+            def __init__(self, series: pd.Series) -> None:
+                self.series = series
+
+            def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
+                return self.series
+
+            def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+                return self.series
+
+        provider = CompositeDataProvider(object(), [FakeFundamentals(empty), FakeFundamentals(alpha), FakeFundamentals(yahoo)])  # type: ignore[arg-type]
+
+        out = provider.get_fundamental_series("AAPL", "revenue", "quarterly")
+
+        self.assertEqual(list(out), [1.0])
+        self.assertEqual(out.attrs["source"], "Alpha")
+
+    def test_composite_pe_returns_first_finite_series_or_last_fallback(self) -> None:
+        close = pd.Series([10.0], index=pd.to_datetime(["2024-01-01"]))
+        nan_series = pd.Series([float("nan")], index=close.index)
+        nan_series.attrs["source"] = "Yahoo EPS fallback"
+        finite_series = pd.Series([20.0], index=close.index)
+        finite_series.attrs["source"] = "Alpha Vantage EPS"
+
+        class FakeFundamentals:
+            def __init__(self, series: pd.Series) -> None:
+                self.series = series
+
+            def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
+                return pd.Series(dtype=float)
+
+            def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+                return self.series
+
+        provider = CompositeDataProvider(object(), [FakeFundamentals(nan_series), FakeFundamentals(finite_series)])  # type: ignore[arg-type]
+        out = provider.get_historical_pe_series("AAPL", close)
+
+        self.assertEqual(list(out), [20.0])
+        self.assertEqual(out.attrs["source"], "Alpha Vantage EPS")
+
+        fallback_provider = CompositeDataProvider(object(), [FakeFundamentals(nan_series)])  # type: ignore[arg-type]
+        fallback = fallback_provider.get_historical_pe_series("AAPL", close)
+
+        self.assertTrue(pd.isna(fallback.iloc[0]))
+        self.assertEqual(fallback.attrs["source"], "Yahoo EPS fallback")
+
+    def test_pe_merge_normalizes_mixed_datetime_resolutions(self) -> None:
+        close = pd.Series(
+            [100.0, 120.0],
+            index=pd.DatetimeIndex(["2024-01-02", "2024-04-02"]).astype("datetime64[s]"),
+            dtype=float,
+        )
+        pe = _merge_asof_price_over_eps(
+            close,
+            pd.DatetimeIndex(["2023-12-31", "2024-03-31"]).astype("datetime64[us]"),
+            pd.Series([4.0, 5.0]).to_numpy(dtype=float),
+        )
+
+        self.assertEqual(list(pe), [25.0, 24.0])
 
 
 class MoversTest(unittest.TestCase):

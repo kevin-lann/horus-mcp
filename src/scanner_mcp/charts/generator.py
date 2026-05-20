@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from scanner_mcp.data.provider import YFinanceProvider
+from scanner_mcp.data.provider import DataProvider
 from scanner_mcp.indicators import ta
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 
@@ -47,7 +47,7 @@ def _fig_to_b64(fig: go.Figure, chart_type: str) -> str:
 
 
 def generate_chart(
-    provider: YFinanceProvider,
+    provider: DataProvider,
     chart_type: str,
     params: dict[str, Any],
 ) -> dict[str, str]:
@@ -108,59 +108,9 @@ def _merge_asof_price_over_eps(
     return pe_sorted.reindex(close.index)
 
 
-def _quarterly_ttm_pe_series(symbol: str, close: pd.Series) -> pd.Series:
-    """P/E from rolling 4-quarter Diluted (or Basic) EPS vs close (Yahoo caps at ~5 quarters)."""
-    import yfinance as yf
-
-    sym = str(symbol).strip().upper()
-    stmt = yf.Ticker(sym).quarterly_incomestmt
-    if stmt is None or stmt.empty:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    if "Diluted EPS" in stmt.index:
-        qeps = stmt.loc["Diluted EPS"]
-    elif "Basic EPS" in stmt.index:
-        qeps = stmt.loc["Basic EPS"]
-    else:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    qeps = qeps.dropna().sort_index().astype(float)
-    if len(qeps) < 4:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    ttm = qeps.rolling(window=4, min_periods=4).sum()
-    ttm = ttm.dropna()
-    if ttm.empty:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    return _merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
-
-
-def _annual_fy_eps_pe_series(symbol: str, close: pd.Series) -> pd.Series:
-    """P/E vs fiscal-year Diluted (or Basic) EPS from annual statements (longer history than quarterly cap)."""
-    import yfinance as yf
-
-    sym = str(symbol).strip().upper()
-    stmt = yf.Ticker(sym).incomestmt
-    if stmt is None or stmt.empty:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    if "Diluted EPS" in stmt.index:
-        fy = stmt.loc["Diluted EPS"]
-    elif "Basic EPS" in stmt.index:
-        fy = stmt.loc["Basic EPS"]
-    else:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    fy = fy.dropna().sort_index().astype(float)
-    if fy.empty:
-        return pd.Series(np.nan, index=close.index, dtype=float)
-    return _merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
-
-
-def _trailing_pe_series(symbol: str, close: pd.Series) -> pd.Series:
-    """P/E aligned to `close`: prefer quarterly TTM where Yahoo provides enough quarters; else FY EPS.
-
-    Yahoo fundamentals cap quarterly columns (~5), so true TTM only exists for the last ~1–2 years.
-    Annual Diluted EPS keyed on fiscal year-end fills earlier dates (FY P/E, not TTM).
-    """
-    pe_q = _quarterly_ttm_pe_series(symbol, close)
-    pe_a = _annual_fy_eps_pe_series(symbol, close)
-    return pe_q.combine_first(pe_a)
+def _trailing_pe_series(provider: DataProvider, symbol: str, close: pd.Series) -> pd.Series:
+    """P/E aligned to `close`, provided by the configured data provider."""
+    return provider.get_historical_pe_series(str(symbol), close)
 
 
 def _statement_metric_series(stmt: pd.DataFrame, metric: str) -> pd.Series:
@@ -184,22 +134,6 @@ def _statement_metric_series(stmt: pd.DataFrame, metric: str) -> pd.Series:
             out.index = pd.DatetimeIndex(out.index)
             return out
     raise ValueError(f"No {metric_key} data in yfinance income statement")
-
-
-def _fundamental_series(symbol: str, metric: str, frequency: str) -> pd.Series:
-    """Fetch annual or quarterly income-statement data from yfinance."""
-    import yfinance as yf
-
-    sym = str(symbol).strip().upper()
-    freq = str(frequency).strip().lower()
-    ticker = yf.Ticker(sym)
-    if freq in {"annual", "yearly", "year"}:
-        stmt = ticker.incomestmt
-    elif freq in {"quarterly", "quarter", "q"}:
-        stmt = ticker.quarterly_incomestmt
-    else:
-        raise ValueError("frequency must be quarterly or annual")
-    return _statement_metric_series(stmt, metric)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -459,7 +393,7 @@ def _price_history_legend_layout() -> dict[str, Any]:
         "orientation": "h",
         "x": 0.02,
         "xanchor": "left",
-        "y": 1.1,
+        "y": 1.05,
         "yanchor": "top",
         "bgcolor": "rgba(255,255,255,0.85)",
     }
@@ -516,7 +450,7 @@ def _apply_fib_x_padding(fig: go.Figure, df: pd.DataFrame, p: dict[str, Any], ro
         fig.update_xaxes(range=x_range, row=row, col=1)
 
 
-def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _price_history(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
@@ -541,11 +475,12 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
     close = df["Close"].astype(float)
-    pe = _trailing_pe_series(sym, close)
+    pe = _trailing_pe_series(provider, sym, close)
+    pe_source = str(pe.attrs.get("source", "provider"))
     if not np.isfinite(pe.to_numpy(dtype=float)).any():
         raise ValueError(
-            "No P/E for this symbol (no usable quarterly TTM or annual Diluted/Basic EPS in "
-            "yfinance; many ETFs and funds have none)."
+            "No P/E for this symbol (Alpha Vantage did not return EPS history and Yahoo had no "
+            "usable quarterly TTM or annual Diluted/Basic EPS; many ETFs and funds have none)."
         )
 
     fig = make_subplots(
@@ -560,7 +495,7 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
         go.Scatter(
             x=df.index,
             y=pe,
-            name="P/E (TTM or FY EPS)",
+            name=f"P/E ({pe_source})",
             mode="lines",
             line={"color": "#2563eb", "width": 1.4},
             connectgaps=False,
@@ -580,11 +515,11 @@ def _price_history(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
     fig.update_xaxes(title_text="Date", row=2, col=1)
     _apply_fib_x_padding(fig, df, p, rows=2)
     fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="P/E (TTM or FY EPS)", row=2, col=1)
+    fig.update_yaxes(title_text=f"P/E ({pe_source})", row=2, col=1)
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_history")}
 
 
-def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _price_overlay(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Plot multiple symbols on one line chart, optionally normalized to 100."""
     syms: list = p.get("symbols") or ["SPY", "QQQ"]
     period = p.get("period", "1y")
@@ -608,15 +543,31 @@ def _price_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, s
 def _format_large_axis(value: float) -> str:
     abs_value = abs(value)
     if abs_value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.1f}B"
+        scaled = value / 1_000_000_000
+        return f"{scaled:g}B"
     if abs_value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
+        scaled = value / 1_000_000
+        return f"{scaled:g}M"
     if abs_value >= 1_000:
-        return f"{value / 1_000:.1f}K"
+        scaled = value / 1_000
+        return f"{scaled:g}K"
     return f"{value:g}"
 
 
-def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _large_axis_tick_values(values: pd.Series) -> tuple[list[float], list[str]]:
+    vals = values.to_numpy(dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return [], []
+    lo = min(0.0, float(vals.min()))
+    hi = float(vals.max())
+    if hi <= lo:
+        return [hi], [_format_large_axis(hi)]
+    ticks = np.linspace(lo, hi, 5)
+    return [float(v) for v in ticks], [_format_large_axis(float(v)) for v in ticks]
+
+
+def _fundamental_overlay(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Overlay price history with revenue or earnings bars from income statements."""
     sym = str(p.get("symbol", "AAPL")).strip().upper()
     period = p.get("period", "5y")
@@ -628,9 +579,10 @@ def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
     df = provider.get_history(sym, period=str(period), interval=str(interval))
     if df.empty:
         raise ValueError("No price data")
-    fundamentals = _fundamental_series(sym, metric, frequency)
+    fundamentals = provider.get_fundamental_series(sym, metric, frequency)
     if fundamentals.empty:
-        raise ValueError(f"No {metric} data")
+        raise ValueError(f"No {metric} data from Alpha Vantage or Yahoo fallback")
+    fundamental_source = str(fundamentals.attrs.get("source", "provider"))
 
     start = pd.Timestamp(df.index[0])
     end = pd.Timestamp(df.index[-1])
@@ -645,6 +597,7 @@ def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
     visible_fundamentals = fundamentals[(fundamentals.index >= start) & (fundamentals.index <= end)]
     if visible_fundamentals.empty:
         raise ValueError(f"No {metric} data within visible price period")
+    fundamental_ticks, fundamental_ticktext = _large_axis_tick_values(visible_fundamentals)
 
     metric_title = "Revenue" if metric == "revenue" else "Earnings"
     frequency_title = "Annual" if frequency in {"annual", "yearly", "year"} else "Quarterly"
@@ -654,7 +607,7 @@ def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
         go.Bar(
             x=visible_fundamentals.index,
             y=visible_fundamentals.values,
-            name=f"{frequency_title} {metric_title}",
+            name=f"{frequency_title} {metric_title} ({fundamental_source})",
             marker={"color": bar_color},
             opacity=0.34,
             hovertemplate=f"{frequency_title} {metric_title}<br>%{{x|%Y-%m-%d}}<br>%{{customdata}}<extra></extra>",
@@ -701,11 +654,11 @@ def _fundamental_overlay(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
         paper_bgcolor="#ffffff",
     )
     fig.update_yaxes(showgrid=True, gridcolor="rgba(17,24,39,0.08)", secondary_y=False)
-    fig.update_yaxes(showgrid=False, tickformat=".3s", secondary_y=True)
+    fig.update_yaxes(showgrid=False, tickmode="array", tickvals=fundamental_ticks, ticktext=fundamental_ticktext, secondary_y=True)
     return {"mime": "image/png", "data": _fig_to_b64(fig, "fundamental_overlay")}
 
 
-def _forward_returns_chart(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _forward_returns_chart(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Build a price/event chart plus forward-return summary table."""
     from scanner_mcp.research.forward_returns import (  # local import
         DEFAULT_FORWARD_WINDOWS,
@@ -994,7 +947,7 @@ def _mix_rgb(start: tuple[int, int, int], end: tuple[int, int, int], weight: flo
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
-def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _drawdown_comparison(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Compare percentage drawdowns from each symbol's running high."""
     syms: list = p.get("symbols") or ["^GSPC", "QQQ"]
     period = p.get("period", "5y")
@@ -1011,7 +964,7 @@ def _drawdown_comparison(provider: YFinanceProvider, p: dict[str, Any]) -> dict[
     return {"mime": "image/png", "data": _fig_to_b64(fig, "drawdown_comparison")}
 
 
-def _log_cycle(provider: YFinanceProvider, p: dict[str, Any]) -> dict[str, str]:
+def _log_cycle(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Plot weekly log10 close values for long-cycle price inspection."""
     sym = str(p.get("symbol", "BTC-USD"))
     period = p.get("period", "max")
