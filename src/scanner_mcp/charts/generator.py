@@ -302,7 +302,8 @@ def _add_price_history_main_traces(
         )
 
     if _as_bool(p.get("show_avwap", p.get("avwap", False))):
-        avwap = _anchored_vwap(source_df, p.get("avwap_anchor")).reindex(x)
+        anchor = p.get("avwap_anchor") if p.get("avwap_anchor") else x[0]
+        avwap = _anchored_vwap(source_df, anchor).reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(

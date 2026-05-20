@@ -241,6 +241,43 @@ class ChartGeneratorTest(unittest.TestCase):
         self.assertIsNotNone(provider.calls[1]["start"])
         self.assertIsNotNone(provider.calls[1]["end"])
 
+    def test_avwap_defaults_to_first_visible_bar_when_preroll_exists(self) -> None:
+        visible_index = pd.date_range("2024-01-10", periods=3, freq="D")
+        full_index = pd.date_range("2024-01-01", periods=12, freq="D")
+        visible_df = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0],
+                "High": [11.0, 12.0, 13.0],
+                "Low": [9.0, 10.0, 11.0],
+                "Close": [10.0, 11.0, 12.0],
+                "Volume": [100.0, 100.0, 100.0],
+            },
+            index=visible_index,
+        )
+        full_df = pd.DataFrame(
+            {
+                "Open": np.arange(1.0, 13.0),
+                "High": np.arange(2.0, 14.0),
+                "Low": np.arange(0.0, 12.0),
+                "Close": np.arange(1.0, 13.0),
+                "Volume": 100.0,
+            },
+            index=full_index,
+        )
+        fig = go.Figure()
+
+        generator._add_price_history_main_traces(
+            fig,
+            visible_df,
+            "XYZ",
+            {"show_avwap": True},
+            indicator_df=full_df,
+        )
+
+        avwap = next(trace for trace in fig.data if trace.name == "aVWAP")
+        expected = generator._anchored_vwap(full_df, visible_index[0]).reindex(visible_index)
+        np.testing.assert_allclose(np.asarray(avwap.y, dtype=float), expected.to_numpy(dtype=float))
+
     def test_forward_return_color_helpers(self) -> None:
         self.assertEqual(generator._window_label(21), "1 Month")
         self.assertEqual(generator._window_label(7), "7d")
