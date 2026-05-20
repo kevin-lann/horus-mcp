@@ -44,15 +44,15 @@ class TTLCacheTest(unittest.TestCase):
 
 class YFinanceProviderTest(unittest.TestCase):
     def test_history_is_cached_and_returned_as_copy(self) -> None:
-        calls: list[tuple[str, str]] = []
+        calls: list[dict[str, object]] = []
         df = pd.DataFrame({"Close": [1.0, 2.0]})
 
         class FakeTicker:
             def __init__(self, symbol: str) -> None:
                 self.symbol = symbol
 
-            def history(self, *, period: str, interval: str, auto_adjust: bool) -> pd.DataFrame:
-                calls.append((period, interval))
+            def history(self, **kwargs: object) -> pd.DataFrame:
+                calls.append(dict(kwargs))
                 return df
 
         with patch("scanner_mcp.data.provider.yf.Ticker", FakeTicker):
@@ -61,8 +61,34 @@ class YFinanceProviderTest(unittest.TestCase):
             first.iloc[0, 0] = 999.0
             second = provider.get_history("SPY", period="1mo", interval="1d")
 
-        self.assertEqual(calls, [("1mo", "1d")])
+        self.assertEqual(calls, [{"period": "1mo", "interval": "1d", "auto_adjust": True}])
         self.assertEqual(float(second.iloc[0]["Close"]), 1.0)
+
+    def test_history_uses_explicit_start_end_when_provided(self) -> None:
+        calls: list[dict[str, object]] = []
+        df = pd.DataFrame({"Close": [1.0, 2.0]})
+
+        class FakeTicker:
+            def __init__(self, _symbol: str) -> None:
+                pass
+
+            def history(self, **kwargs: object) -> pd.DataFrame:
+                calls.append(dict(kwargs))
+                return df
+
+        with patch("scanner_mcp.data.provider.yf.Ticker", FakeTicker):
+            out = YFinanceProvider().get_history(
+                "SPY",
+                interval="1d",
+                start=pd.Timestamp("2024-01-01"),
+                end=pd.Timestamp("2024-02-01"),
+            )
+
+        self.assertFalse(out.empty)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("start", calls[0])
+        self.assertIn("end", calls[0])
+        self.assertNotIn("period", calls[0])
 
     def test_history_failure_returns_empty_dataframe(self) -> None:
         class FakeTicker:

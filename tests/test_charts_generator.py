@@ -13,12 +13,20 @@ from scanner_mcp.charts import generator
 class FakeProvider:
     def __init__(self, frames: dict[str, pd.DataFrame]) -> None:
         self.frames = frames
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[dict[str, object]] = []
         self.fundamentals = pd.Series(dtype=float)
         self.pe = pd.Series(dtype=float)
 
-    def get_history(self, symbol: str, *, period: str, interval: str) -> pd.DataFrame:
-        self.calls.append((symbol, period, interval))
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        period: str = "6mo",
+        interval: str = "1d",
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame:
+        self.calls.append({"symbol": symbol, "period": period, "interval": interval, "start": start, "end": end})
         return self.frames.get(symbol, pd.DataFrame())
 
     def get_fundamental_series(self, _symbol: str, _metric: str, _frequency: str) -> pd.Series:
@@ -176,6 +184,62 @@ class ChartGeneratorTest(unittest.TestCase):
         self.assertEqual(fib_label.xref, "paper")
         self.assertEqual(fib_label.xanchor, "right")
         self.assertEqual(fib_label.font.size, 8)
+
+    def test_price_history_fetches_preroll_for_indicator_warmup(self) -> None:
+        visible_index = pd.date_range("2024-01-10", periods=3, freq="D")
+        full_index = pd.date_range("2024-01-01", periods=12, freq="D")
+        visible_df = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0],
+                "High": [11.0, 12.0, 13.0],
+                "Low": [9.0, 10.0, 11.0],
+                "Close": [10.0, 11.0, 12.0],
+                "Volume": [100.0, 100.0, 100.0],
+            },
+            index=visible_index,
+        )
+        full_df = pd.DataFrame(
+            {
+                "Open": np.arange(1.0, 13.0),
+                "High": np.arange(2.0, 14.0),
+                "Low": np.arange(0.0, 12.0),
+                "Close": np.arange(1.0, 13.0),
+                "Volume": 100.0,
+            },
+            index=full_index,
+        )
+
+        class WarmupProvider(FakeProvider):
+            def get_history(
+                self,
+                symbol: str,
+                *,
+                period: str = "6mo",
+                interval: str = "1d",
+                start: object | None = None,
+                end: object | None = None,
+            ) -> pd.DataFrame:
+                self.calls.append({"symbol": symbol, "period": period, "interval": interval, "start": start, "end": end})
+                return full_df if start is not None or end is not None else visible_df
+
+        provider = WarmupProvider({"XYZ": visible_df})
+
+        def fake_render(fig: go.Figure, _chart_type: str) -> str:
+            candle = fig.data[0]
+            sma = next(trace for trace in fig.data if trace.name == "SMA 5")
+            self.assertEqual(list(candle.x), list(visible_index))
+            self.assertEqual(list(sma.x), list(visible_index))
+            self.assertFalse(pd.isna(pd.Series(sma.y)).any())
+            return "pngdata"
+
+        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
+            result = generator._price_history(provider, {"symbol": "XYZ", "period": "1mo", "show_ma": True, "ma_period": 5})
+
+        self.assertEqual(result["data"], "pngdata")
+        self.assertEqual(len(provider.calls), 2)
+        self.assertIsNone(provider.calls[0]["start"])
+        self.assertIsNotNone(provider.calls[1]["start"])
+        self.assertIsNotNone(provider.calls[1]["end"])
 
     def test_forward_return_color_helpers(self) -> None:
         self.assertEqual(generator._window_label(21), "1 Month")

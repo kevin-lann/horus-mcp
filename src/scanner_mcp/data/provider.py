@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -49,6 +50,8 @@ class DataProvider(FundamentalsProvider, ABC):
         *,
         period: str = "6mo",
         interval: str = "1d",
+        start: datetime | pd.Timestamp | str | None = None,
+        end: datetime | pd.Timestamp | str | None = None,
     ) -> pd.DataFrame:
         """Return OHLCV history for a symbol, or an empty DataFrame on failure."""
         ...
@@ -195,6 +198,8 @@ class YFinanceProvider(DataProvider):
         *,
         period: str = "6mo",
         interval: str = "1d",
+        start: datetime | pd.Timestamp | str | None = None,
+        end: datetime | pd.Timestamp | str | None = None,
     ) -> pd.DataFrame:
         """Fetch historical OHLCV data and cache by symbol, period, and interval.
 
@@ -202,14 +207,17 @@ class YFinanceProvider(DataProvider):
         returned DataFrame is copied so callers cannot mutate cached data.
         """
         sym = symbol.strip().upper()
-        key = ("hist", sym, period, interval)
+        key = ("hist", sym, period, interval, str(start) if start is not None else None, str(end) if end is not None else None)
         hit = self._hist_cache.get(key)
         if hit is not None:
             log.debug("history cache hit %s %s %s rows=%s", sym, period, interval, len(hit))
             return hit.copy()
         t = yf.Ticker(sym)
         try:
-            df = t.history(period=period, interval=interval, auto_adjust=True)
+            if start is not None or end is not None:
+                df = t.history(start=start, end=end, interval=interval, auto_adjust=True)
+            else:
+                df = t.history(period=period, interval=interval, auto_adjust=True)
         except Exception as e:  # noqa: BLE001
             log.exception("history failed %s %s %s: %s", sym, period, interval, e)
             return _empty_df()
@@ -453,8 +461,10 @@ class CompositeDataProvider(DataProvider):
         *,
         period: str = "6mo",
         interval: str = "1d",
+        start: datetime | pd.Timestamp | str | None = None,
+        end: datetime | pd.Timestamp | str | None = None,
     ) -> pd.DataFrame:
-        return self._market_provider.get_history(symbol, period=period, interval=interval)
+        return self._market_provider.get_history(symbol, period=period, interval=interval, start=start, end=end)
 
     def get_fast_info(self, symbol: str) -> dict[str, Any]:
         return self._market_provider.get_fast_info(symbol)

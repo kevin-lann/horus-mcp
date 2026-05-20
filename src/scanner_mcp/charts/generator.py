@@ -168,12 +168,15 @@ def _add_price_history_main_traces(
     symbol: str,
     p: dict[str, Any],
     row: int | None = None,
+    indicator_df: pd.DataFrame | None = None,
 ) -> None:
     """Add price-history candlesticks plus optional overlays to a figure."""
+    source_df = indicator_df if indicator_df is not None else df
     close = df["Close"].astype(float)
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
     x = df.index
+    source_close = source_df["Close"].astype(float)
 
     _add_price_trace(
         fig,
@@ -191,10 +194,10 @@ def _add_price_history_main_traces(
     if _as_bool(p.get("show_bollinger_bands", p.get("bollinger_bands", False))):
         period = _positive_int(p.get("bb_period", 20), 20)
         std = float(p.get("bb_std", 2.0))
-        bands = ta.bbands(close, length=period, std=std)
-        lower = bands[f"BBL_{period}_{std}"]
-        mid = bands[f"BBM_{period}_{std}"]
-        upper = bands[f"BBU_{period}_{std}"]
+        bands = ta.bbands(source_close, length=period, std=std)
+        lower = bands[f"BBL_{period}_{std}"].reindex(x)
+        mid = bands[f"BBM_{period}_{std}"].reindex(x)
+        upper = bands[f"BBU_{period}_{std}"].reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(
@@ -237,8 +240,8 @@ def _add_price_history_main_traces(
     if _as_bool(p.get("show_ma_cloud", p.get("ma_cloud", False))):
         fast = _positive_int(p.get("ma_cloud_fast", 50), 50)
         slow = _positive_int(p.get("ma_cloud_slow", 200), 200)
-        fast_ma = ta.sma(close, length=fast)
-        slow_ma = ta.sma(close, length=slow)
+        fast_ma = ta.sma(source_close, length=fast).reindex(x)
+        slow_ma = ta.sma(source_close, length=slow).reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(
@@ -268,7 +271,7 @@ def _add_price_history_main_traces(
 
     if _as_bool(p.get("show_ma", p.get("ma", False))):
         period = _positive_int(p.get("ma_period", 50), 50)
-        ma = ta.sma(close, length=period)
+        ma = ta.sma(source_close, length=period).reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(
@@ -284,7 +287,7 @@ def _add_price_history_main_traces(
 
     if _as_bool(p.get("show_ema", p.get("ema", False))):
         period = _positive_int(p.get("ema_period", 21), 21)
-        ema = ta.ema(close, length=period)
+        ema = ta.ema(source_close, length=period).reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(
@@ -299,7 +302,7 @@ def _add_price_history_main_traces(
         )
 
     if _as_bool(p.get("show_avwap", p.get("avwap", False))):
-        avwap = _anchored_vwap(df, p.get("avwap_anchor"))
+        avwap = _anchored_vwap(source_df, p.get("avwap_anchor")).reindex(x)
         _add_price_trace(
             fig,
             go.Scatter(
@@ -393,7 +396,7 @@ def _price_history_legend_layout() -> dict[str, Any]:
         "orientation": "h",
         "x": 0.02,
         "xanchor": "left",
-        "y": 1.05,
+        "y": 1.07,
         "yanchor": "top",
         "bgcolor": "rgba(255,255,255,0.85)",
     }
@@ -450,18 +453,74 @@ def _apply_fib_x_padding(fig: go.Figure, df: pd.DataFrame, p: dict[str, Any], ro
         fig.update_xaxes(range=x_range, row=row, col=1)
 
 
+def _price_history_indicator_lookback_bars(p: dict[str, Any]) -> int:
+    """Return the largest warm-up window required by enabled overlays."""
+    lookbacks: list[int] = []
+    if _as_bool(p.get("show_bollinger_bands", p.get("bollinger_bands", False))):
+        lookbacks.append(_positive_int(p.get("bb_period", 20), 20))
+    if _as_bool(p.get("show_ma", p.get("ma", False))):
+        lookbacks.append(_positive_int(p.get("ma_period", 50), 50))
+    if _as_bool(p.get("show_ema", p.get("ema", False))):
+        lookbacks.append(_positive_int(p.get("ema_period", 21), 21))
+    if _as_bool(p.get("show_ma_cloud", p.get("ma_cloud", False))):
+        lookbacks.extend(
+            [
+                _positive_int(p.get("ma_cloud_fast", 50), 50),
+                _positive_int(p.get("ma_cloud_slow", 200), 200),
+            ]
+        )
+    return max(lookbacks, default=0)
+
+
+def _price_history_preroll_delta(interval: str, bars: int) -> pd.Timedelta:
+    """Approximate a bar-based lookback as calendar time for yfinance start dates."""
+    if bars <= 0:
+        return pd.Timedelta(0)
+    interval_key = str(interval).strip().lower()
+    if interval_key in {"1wk", "1w", "wk", "week", "weekly"}:
+        return pd.Timedelta(days=(bars * 9) + 14)
+    if interval_key in {"1mo", "3mo", "1mth", "month", "monthly"}:
+        return pd.Timedelta(days=(bars * 35) + 31)
+    if interval_key in {"5d"}:
+        return pd.Timedelta(days=(bars * 7) + 7)
+    return pd.Timedelta(days=(bars * 2) + 7)
+
+
+def _price_history_frames(
+    provider: DataProvider,
+    symbol: str,
+    period: str,
+    interval: str,
+    p: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return visible history plus optional pre-roll history for indicator warm-up."""
+    visible_df = provider.get_history(symbol, period=period, interval=interval)
+    if visible_df.empty:
+        return visible_df, visible_df
+    lookback_bars = _price_history_indicator_lookback_bars(p)
+    if lookback_bars <= 0:
+        return visible_df, visible_df
+    visible_index = pd.DatetimeIndex(visible_df.index)
+    preroll_start = visible_index[0] - _price_history_preroll_delta(interval, lookback_bars)
+    visible_end = visible_index[-1] + pd.Timedelta(days=1)
+    full_df = provider.get_history(symbol, interval=interval, start=preroll_start, end=visible_end)
+    if full_df.empty:
+        return visible_df, visible_df
+    return visible_df, full_df
+
+
 def _price_history(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
     """Create a candlestick chart for one symbol over a requested period."""
     sym = p.get("symbol", "SPY")
     period = p.get("period", "1y")
     interval = p.get("interval", "1d")
     pe_subchart = _as_bool(p.get("pe_subchart", False))
-    df = provider.get_history(str(sym), period=str(period), interval=str(interval))
+    df, indicator_df = _price_history_frames(provider, str(sym), str(period), str(interval), p)
     if df.empty:
         raise ValueError("No price data")
     if not pe_subchart:
         fig = go.Figure()
-        _add_price_history_main_traces(fig, df, str(sym), p)
+        _add_price_history_main_traces(fig, df, str(sym), p, indicator_df=indicator_df)
         fig.update_layout(xaxis_rangeslider_visible=False)
         fig.update_layout(
             title=f"{sym} {period} {interval}",
@@ -490,7 +549,7 @@ def _price_history(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
         vertical_spacing=0.06,
         row_heights=[0.68, 0.32],
     )
-    _add_price_history_main_traces(fig, df, str(sym), p, row=1)
+    _add_price_history_main_traces(fig, df, str(sym), p, row=1, indicator_df=indicator_df)
     fig.add_trace(
         go.Scatter(
             x=df.index,
