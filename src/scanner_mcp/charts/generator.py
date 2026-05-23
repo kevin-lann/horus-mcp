@@ -62,6 +62,12 @@ def generate_chart(
         return _price_history(provider, params)
     if ct == "price_overlay":
         return _price_overlay(provider, params)
+    if ct == "ratio_chart":
+        return _ratio_chart(provider, params)
+    if ct == "relative_strength":
+        return _relative_strength_chart(provider, params)
+    if ct == "sector_rotation":
+        return _sector_rotation_chart(provider, params)
     if ct == "fundamental_overlay":
         return _fundamental_overlay(provider, params)
     if ct == "forward_returns":
@@ -598,6 +604,272 @@ def _price_overlay(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
         yaxis_title="Y",
     )
     return {"mime": "image/png", "data": _fig_to_b64(fig, "price_overlay")}
+
+
+def _clean_layout(fig: go.Figure, *, title: str, yaxis_title: str, height: int = 680) -> None:
+    """Apply a consistent clean chart style used by comparison-style presets."""
+    fig.update_layout(
+        title=title,
+        xaxis_title="Date",
+        yaxis_title=yaxis_title,
+        height=height,
+        margin={"l": 60, "r": 80, "t": 78, "b": 48},
+        legend={"orientation": "h", "x": 0.01, "xanchor": "left", "y": 1.08, "yanchor": "top"},
+        hovermode="x unified",
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.06)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=False)
+
+
+def _close_series(provider: DataProvider, symbol: str, period: str, interval: str = "1d") -> pd.Series:
+    """Fetch one close series with a normalized symbol label."""
+    sym = str(symbol).strip().upper()
+    df = provider.get_history(sym, period=period, interval=interval)
+    if df.empty or "Close" not in df.columns:
+        raise ValueError(f"No price data for {sym}")
+    close = df["Close"].astype(float).dropna()
+    if close.empty:
+        raise ValueError(f"No close data for {sym}")
+    close.name = sym
+    return close
+
+
+def _aligned_close_frame(
+    provider: DataProvider,
+    symbols: list[str],
+    period: str,
+    interval: str = "1d",
+) -> pd.DataFrame:
+    """Return close series aligned on a shared date index."""
+    frames: list[pd.Series] = []
+    for symbol in symbols:
+        series = _close_series(provider, symbol, period, interval)
+        frames.append(series)
+    aligned = pd.concat(frames, axis=1, join="inner").dropna(how="any")
+    if aligned.empty:
+        raise ValueError("No overlapping price history for requested symbols")
+    return aligned
+
+
+def _normalize_to_100(series: pd.Series) -> pd.Series:
+    base = float(series.iloc[0])
+    if not np.isfinite(base) or base == 0:
+        raise ValueError(f"Cannot normalize series {series.name or ''}: invalid starting value")
+    return series / base * 100.0
+
+
+def _contiguous_true_spans(mask: pd.Series) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Collapse a boolean mask into contiguous x-axis spans."""
+    if mask.empty:
+        return []
+    clean_mask = mask.fillna(False).astype(bool)
+    spans: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    start: pd.Timestamp | None = None
+    prev: pd.Timestamp | None = None
+    for ts, is_true in clean_mask.items():
+        ts = pd.Timestamp(ts)
+        if is_true and start is None:
+            start = ts
+        if not is_true and start is not None and prev is not None:
+            spans.append((start, prev))
+            start = None
+        prev = ts
+    if start is not None and prev is not None:
+        spans.append((start, prev))
+    return spans
+
+
+def _ratio_chart(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Plot one asset priced as a ratio of another asset."""
+    symbol = str(p.get("symbol", "SPY")).strip().upper()
+    benchmark = str(p.get("benchmark", "XLP")).strip().upper()
+    period = str(p.get("period", "1y"))
+    closes = _aligned_close_frame(provider, [symbol, benchmark], period)
+    ratio = closes[symbol] / closes[benchmark]
+
+    fig = go.Figure(
+        data=[
+            go.Scatter(
+                x=ratio.index,
+                y=ratio,
+                name=f"{symbol}/{benchmark}",
+                mode="lines",
+                line={"color": "#1d4ed8", "width": 2.2},
+            )
+        ]
+    )
+    _clean_layout(fig, title=f"Ratio chart: {symbol} vs {benchmark}", yaxis_title=f"{symbol}/{benchmark}")
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "ratio_chart")}
+
+
+def _relative_strength_chart(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Plot stock-vs-benchmark ratio with a moving average and leadership shading."""
+    symbol = str(p.get("symbol", "AAPL")).strip().upper()
+    benchmark = str(p.get("benchmark", "SPY")).strip().upper()
+    period = str(p.get("period", "2y"))
+    ma_period = _positive_int(p.get("ma_period", 50), 50)
+
+    closes = _aligned_close_frame(provider, [symbol, benchmark], period)
+    ratio = (closes[symbol] / closes[benchmark]).rename(f"{symbol}/{benchmark}")
+    ratio_ma = ta.sma(ratio, length=ma_period)
+    plot_frame = pd.DataFrame({"ratio": ratio, "ma": ratio_ma}).dropna()
+    if plot_frame.empty:
+        raise ValueError(f"Not enough data to compute a {ma_period}-day relative strength average")
+
+    fig = go.Figure()
+    for start, end in _contiguous_true_spans(plot_frame["ratio"] >= plot_frame["ma"]):
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(22,163,74,0.10)",
+            line_width=0,
+            layer="below",
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_frame.index,
+            y=plot_frame["ratio"],
+            name=f"{symbol}/{benchmark}",
+            mode="lines",
+            line={"color": "#0f172a", "width": 2.2},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_frame.index,
+            y=plot_frame["ma"],
+            name=f"{ma_period}D SMA",
+            mode="lines",
+            line={"color": "#dc2626", "width": 1.8, "dash": "dash"},
+        )
+    )
+    latest_ratio = float(plot_frame["ratio"].iloc[-1])
+    latest_ma = float(plot_frame["ma"].iloc[-1])
+    status = "Above MA" if latest_ratio >= latest_ma else "Below MA"
+    _clean_layout(
+        fig,
+        title=f"Relative strength: {symbol} vs {benchmark} ({status})",
+        yaxis_title=f"{symbol}/{benchmark}",
+    )
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "relative_strength")}
+
+
+def _sector_rotation_chart(provider: DataProvider, p: dict[str, Any]) -> dict[str, str]:
+    """Compare normalized sector ETF performance with rolling 63-day returns."""
+    symbols = [str(s).strip().upper() for s in (p.get("symbols") or ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI"])]
+    period = str(p.get("period", "2y"))
+    return_window = _positive_int(p.get("return_window", 63), 63)
+    closes = _aligned_close_frame(provider, symbols, period)
+    normalized = closes.apply(_normalize_to_100, axis=0)
+    rolling_returns = closes / closes.shift(return_window) - 1.0
+    rolling_returns = rolling_returns * 100.0
+    rolling_returns = rolling_returns.dropna(how="all")
+    if rolling_returns.empty:
+        raise ValueError(f"Not enough data to compute {return_window}-day rolling returns")
+
+    latest_norm = normalized.iloc[-1].sort_values(ascending=False)
+    top_symbol = str(latest_norm.index[0])
+    bottom_symbol = str(latest_norm.index[-1])
+    latest_ret = rolling_returns.iloc[-1].dropna().sort_values(ascending=False)
+    if latest_ret.empty:
+        raise ValueError("No rolling return data available for requested symbols")
+
+    colors = [
+        "#1d4ed8",
+        "#dc2626",
+        "#059669",
+        "#7c3aed",
+        "#ea580c",
+        "#0891b2",
+        "#4f46e5",
+        "#65a30d",
+        "#be123c",
+        "#6d28d9",
+    ]
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.62, 0.38],
+    )
+    for idx, symbol in enumerate(symbols):
+        color = colors[idx % len(colors)]
+        width = 3.0 if symbol == top_symbol else 1.4
+        opacity = 1.0 if symbol in {top_symbol, bottom_symbol} else 0.8
+        dash = "dot" if symbol == bottom_symbol else "solid"
+        fig.add_trace(
+            go.Scatter(
+                x=normalized.index,
+                y=normalized[symbol],
+                name=symbol,
+                mode="lines",
+                line={"color": color, "width": width, "dash": dash},
+                opacity=opacity,
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_returns.index,
+                y=rolling_returns[symbol],
+                name=f"{symbol} {return_window}D",
+                mode="lines",
+                line={"color": color, "width": width if symbol == top_symbol else 1.2, "dash": dash},
+                opacity=opacity,
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+
+    top_value = float(latest_norm.iloc[0])
+    bottom_value = float(latest_norm.iloc[-1])
+    fig.add_trace(
+        go.Scatter(
+            x=[normalized.index[-1], normalized.index[-1]],
+            y=[top_value, bottom_value],
+            mode="markers+text",
+            text=[f"Top: {top_symbol}", f"Bottom: {bottom_symbol}"],
+            textposition=["middle right", "middle right"],
+            marker={
+                "color": ["#15803d", "#b91c1c"],
+                "size": [8, 8],
+                "line": {"color": "#ffffff", "width": 1},
+            },
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.update_layout(
+        title=f"Sector rotation / ETF comparison ({return_window}-day return panel)",
+        height=840,
+        margin={"l": 60, "r": 120, "t": 78, "b": 48},
+        legend={"orientation": "h", "x": 0.01, "xanchor": "left", "y": 1.03, "yanchor": "top"},
+        hovermode="x unified",
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+    )
+    if len(normalized.index) >= 2:
+        x_index = pd.DatetimeIndex(normalized.index)
+        span = x_index[-1] - x_index[0]
+        diffs = x_index.to_series().diff().dropna()
+        step = diffs.median() if not diffs.empty else pd.Timedelta(days=1)
+        right_pad = max(span * 0.18, step * 20)
+        x_range = [x_index[0], x_index[-1] + right_pad]
+        fig.update_xaxes(range=x_range, row=1, col=1)
+        fig.update_xaxes(range=x_range, row=2, col=1)
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.06)", zeroline=False, row=1, col=1, showticklabels=False)
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.06)", zeroline=False, row=2, col=1, title_text="Date")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=False, row=1, col=1, title_text="Normalized (base=100)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=True, zerolinecolor="rgba(15,23,42,0.12)", row=2, col=1, title_text=f"{return_window}D return %")
+    return {"mime": "image/png", "data": _fig_to_b64(fig, "sector_rotation")}
 
 
 def _format_large_axis(value: float) -> str:

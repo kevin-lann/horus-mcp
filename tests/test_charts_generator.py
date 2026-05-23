@@ -106,6 +106,56 @@ class ChartGeneratorTest(unittest.TestCase):
 
         self.assertEqual(render.call_count, 3)
 
+    def test_ratio_and_relative_strength_and_sector_rotation_render(self) -> None:
+        index = pd.date_range("2024-01-01", periods=90, freq="D")
+        spy = pd.DataFrame({"Close": np.linspace(100.0, 130.0, len(index))}, index=index)
+        xlp = pd.DataFrame({"Close": np.linspace(50.0, 55.0, len(index))}, index=index)
+        aapl = pd.DataFrame({"Close": np.linspace(150.0, 210.0, len(index))}, index=index)
+        xlk = pd.DataFrame({"Close": np.linspace(100.0, 135.0, len(index))}, index=index)
+        xlf = pd.DataFrame({"Close": np.linspace(100.0, 108.0, len(index))}, index=index)
+        xle = pd.DataFrame({"Close": np.linspace(100.0, 94.0, len(index))}, index=index)
+        provider = FakeProvider({"SPY": spy, "XLP": xlp, "AAPL": aapl, "XLK": xlk, "XLF": xlf, "XLE": xle})
+
+        def fake_render(fig: go.Figure, chart_type: str) -> str:
+            if chart_type == "ratio_chart":
+                ratio_trace = fig.data[0]
+                self.assertEqual(ratio_trace.name, "SPY/XLP")
+                self.assertAlmostEqual(float(ratio_trace.y[0]), 2.0)
+            elif chart_type == "relative_strength":
+                self.assertEqual(fig.data[0].name, "AAPL/SPY")
+                self.assertEqual(fig.data[1].name, "10D SMA")
+                self.assertGreaterEqual(len(fig.layout.shapes), 1)
+            elif chart_type == "sector_rotation":
+                names = [trace.name for trace in fig.data]
+                self.assertIn("XLK", names)
+                self.assertIn("XLF 21D", names)
+                self.assertEqual(fig.layout.yaxis.title.text, "Normalized (base=100)")
+                self.assertEqual(fig.layout.yaxis2.title.text, "21D return %")
+                self.assertGreaterEqual(pd.Timestamp(fig.layout.xaxis.range[1]) - index[-1], pd.Timedelta(days=15))
+            else:
+                self.fail(f"unexpected chart type {chart_type}")
+            return "pngdata"
+
+        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
+            self.assertEqual(
+                generator._ratio_chart(provider, {"symbol": "SPY", "benchmark": "XLP", "period": "6mo"})["data"],
+                "pngdata",
+            )
+            self.assertEqual(
+                generator._relative_strength_chart(
+                    provider,
+                    {"symbol": "AAPL", "benchmark": "SPY", "period": "6mo", "ma_period": 10},
+                )["data"],
+                "pngdata",
+            )
+            self.assertEqual(
+                generator._sector_rotation_chart(
+                    provider,
+                    {"symbols": ["XLK", "XLF", "XLE"], "period": "6mo", "return_window": 21},
+                )["data"],
+                "pngdata",
+            )
+
     def test_fundamental_overlay_fetches_statement_bars(self) -> None:
         price = pd.DataFrame(
             {
@@ -286,6 +336,17 @@ class ChartGeneratorTest(unittest.TestCase):
         self.assertEqual(generator._forward_return_cell_color("Mean", None, []), "#ffffff")
         self.assertNotEqual(generator._forward_return_cell_color("Mean", 5.0, [5.0]), "#ffffff")
         self.assertNotEqual(generator._forward_return_cell_color("% Positive", 25.0, [25.0]), "#ffffff")
+
+    def test_contiguous_true_spans_groups_runs(self) -> None:
+        mask = pd.Series(
+            [False, True, True, False, True],
+            index=pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+        )
+
+        spans = generator._contiguous_true_spans(mask)
+
+        self.assertEqual(spans[0], (pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")))
+        self.assertEqual(spans[1], (pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-05")))
 
 
 if __name__ == "__main__":

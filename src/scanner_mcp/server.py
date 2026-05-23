@@ -799,6 +799,51 @@ def chart_price_overlay(
 
 
 @mcp.tool()
+def chart_ratio(
+    symbol: str = "SPY",
+    benchmark: str = "XLP",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+) -> Image | str:
+    """Single-line ratio chart of one asset divided by another asset."""
+    return _chart_tool_result(
+        "ratio_chart",
+        {"symbol": symbol, "benchmark": benchmark, "period": period},
+    )
+
+
+@mcp.tool()
+def chart_relative_strength(
+    symbol: str = "AAPL",
+    benchmark: str = "SPY",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "2y",
+    ma_period: int = 50,
+) -> Image | str:
+    """Stock-vs-benchmark ratio with moving average and leadership shading."""
+    return _chart_tool_result(
+        "relative_strength",
+        {
+            "symbol": symbol,
+            "benchmark": benchmark,
+            "period": period,
+            "ma_period": ma_period,
+        },
+    )
+
+
+@mcp.tool()
+def chart_sector_rotation(
+    symbols: list[str] | None = None,
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "2y",
+    return_window: int = 63,
+) -> Image | str:
+    """Normalized sector/ETF comparison with a rolling return panel."""
+    p: dict[str, Any] = {"period": period, "return_window": return_window}
+    if symbols is not None:
+        p["symbols"] = symbols
+    return _chart_tool_result("sector_rotation", p)
+
+
+@mcp.tool()
 def chart_fundamental_overlay(
     symbol: str = "AAPL",
     metric: Literal["revenue", "earnings"] = "revenue",
