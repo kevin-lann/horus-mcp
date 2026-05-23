@@ -17,7 +17,7 @@ from scanner_mcp.research.forward_returns import (  # noqa: E402
     compute_event_forward_study_from_history,
     summarize_forward_study,
 )
-from scanner_mcp.charts.generator import _forward_event_title, _forward_returns_chart  # noqa: E402
+from scanner_mcp.charts.forward_returns import forward_event_title, forward_returns_chart  # noqa: E402
 
 
 class ForwardReturnsTest(unittest.TestCase):
@@ -178,12 +178,12 @@ class ForwardReturnsTest(unittest.TestCase):
             return "pngdata"
 
         with (
-            patch("scanner_mcp.research.forward_returns.compute_event_forward_study", return_value=study) as compute,
-            patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_fig_to_b64),
+            patch("scanner_mcp.charts.forward_returns.compute_event_forward_study", return_value=study) as compute,
+            patch("scanner_mcp.charts.forward_returns.fig_to_b64", side_effect=fake_fig_to_b64),
         ):
-            result = _forward_returns_chart(
+            result = forward_returns_chart(
                 provider=provider,
-                p={
+                params={
                     "symbol": "XYZ",
                     "event_type": "pct_from_ma",
                     "windows": [1],
@@ -204,23 +204,23 @@ class ForwardReturnsTest(unittest.TestCase):
 
     def test_forward_event_titles_include_resolved_params(self) -> None:
         self.assertEqual(
-            _forward_event_title("pct_from_ma", {"ma_type": "ema", "ma_period": 200, "pct": 3}),
+            forward_event_title("pct_from_ma", {"ma_type": "ema", "ma_period": 200, "pct": 3}),
             "price moves within 3% of 200-day EMA",
         )
         self.assertEqual(
-            _forward_event_title("rsi_oversold", {"period": 10, "threshold": 35}),
+            forward_event_title("rsi_oversold", {"period": 10, "threshold": 35}),
             "RSI Oversold (10-day RSI crosses below 35)",
         )
         self.assertEqual(
-            _forward_event_title("rsi_overbought", None),
+            forward_event_title("rsi_overbought", None),
             "RSI Overbought (14-day RSI crosses above 70)",
         )
         self.assertEqual(
-            _forward_event_title("golden_cross", {"fast": 20, "slow": 100}),
+            forward_event_title("golden_cross", {"fast": 20, "slow": 100}),
             "Golden Cross (20-day SMA crosses above 100-day SMA)",
         )
         self.assertEqual(
-            _forward_event_title("macd_bullish_crossover", {"fast": 8, "slow": 21, "signal": 5}),
+            forward_event_title("macd_bullish_crossover", {"fast": 8, "slow": 21, "signal": 5}),
             "MACD Bullish Crossover (8/21 MACD crosses above 5-day signal)",
         )
 
@@ -257,16 +257,64 @@ class ForwardReturnsTest(unittest.TestCase):
             return "pngdata"
 
         with (
-            patch("scanner_mcp.research.forward_returns.compute_event_forward_study", return_value=study),
-            patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_fig_to_b64),
+            patch("scanner_mcp.charts.forward_returns.compute_event_forward_study", return_value=study),
+            patch("scanner_mcp.charts.forward_returns.fig_to_b64", side_effect=fake_fig_to_b64),
         ):
-            _forward_returns_chart(
+            forward_returns_chart(
                 provider=provider,
-                p={"symbol": "XYZ", "event_type": "rsi_oversold", "windows": [1, 3]},
+                params={"symbol": "XYZ", "event_type": "rsi_oversold", "windows": [1, 3]},
             )
 
         self.assertIn("Signal Positive After 1d", marker_names)
         self.assertEqual(marker_text, ["RSI Oversold<br>1d return: 4.0%"])
+
+    def test_forward_returns_chart_treats_zero_and_nonfinite_returns_as_neutral(self) -> None:
+        price = pd.Series([100.0, 101.0, 102.0], index=pd.date_range("2024-01-01", periods=3))
+        study = ForwardStudy(
+            symbol="XYZ",
+            event_type="rsi_oversold",
+            windows=[1],
+            price=price,
+            events=[
+                ForwardEvent(
+                    index=0,
+                    date=price.index[0],
+                    price=100.0,
+                    label="Zero",
+                    event_type="rsi_oversold",
+                    windows={1: ForwardWindowResult(final_return=0.0, max_loss=0.0, max_gain=0.0)},
+                ),
+                ForwardEvent(
+                    index=1,
+                    date=price.index[1],
+                    price=101.0,
+                    label="NaN",
+                    event_type="rsi_oversold",
+                    windows={1: ForwardWindowResult(final_return=float("nan"), max_loss=0.0, max_gain=0.0)},
+                ),
+            ],
+        )
+        marker_names: list[str | None] = []
+        marker_text: list[str] = []
+
+        def fake_fig_to_b64(fig, _chart_type: str) -> str:
+            marker_names.extend(trace.name for trace in fig.data if getattr(trace, "mode", None) == "markers")
+            for trace in fig.data:
+                if getattr(trace, "mode", None) == "markers":
+                    marker_text.extend(trace.text)
+            return "pngdata"
+
+        with (
+            patch("scanner_mcp.charts.forward_returns.compute_event_forward_study", return_value=study),
+            patch("scanner_mcp.charts.forward_returns.fig_to_b64", side_effect=fake_fig_to_b64),
+        ):
+            forward_returns_chart(
+                provider=object(),
+                params={"symbol": "XYZ", "event_type": "rsi_oversold", "windows": [1]},
+            )
+
+        self.assertEqual(marker_names, ["Signal After 1d"])
+        self.assertEqual(marker_text, ["Zero<br>1d return: 0.0%", "NaN<br>1d return: n/a"])
 
     def test_summary_aggregates_by_window(self) -> None:
         df = pd.DataFrame(

@@ -9,13 +9,14 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from scanner_mcp.charts.data import aligned_close_frame
 from scanner_mcp.data.cache import TTLCache
 from scanner_mcp.data import exchange_universe, movers
+from scanner_mcp.data.fundamentals_utils import merge_asof_price_over_eps
 from scanner_mcp.data.provider import (
     AlphaVantageProvider,
     CompositeDataProvider,
     YFinanceProvider,
-    _merge_asof_price_over_eps,
 )
 
 
@@ -43,6 +44,10 @@ class TTLCacheTest(unittest.TestCase):
 
 
 class YFinanceProviderTest(unittest.TestCase):
+    def test_aligned_close_frame_rejects_empty_symbols(self) -> None:
+        with self.assertRaisesRegex(ValueError, "symbols must not be empty"):
+            aligned_close_frame(object(), [], "1y")  # type: ignore[arg-type]
+
     def test_history_is_cached_and_returned_as_copy(self) -> None:
         calls: list[dict[str, object]] = []
         df = pd.DataFrame({"Close": [1.0, 2.0]})
@@ -295,7 +300,7 @@ class YFinanceProviderTest(unittest.TestCase):
             index=pd.DatetimeIndex(["2024-01-02", "2024-04-02"]).astype("datetime64[s]"),
             dtype=float,
         )
-        pe = _merge_asof_price_over_eps(
+        pe = merge_asof_price_over_eps(
             close,
             pd.DatetimeIndex(["2023-12-31", "2024-03-31"]).astype("datetime64[us]"),
             pd.Series([4.0, 5.0]).to_numpy(dtype=float),

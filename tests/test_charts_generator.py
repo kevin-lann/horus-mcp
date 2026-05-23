@@ -8,6 +8,29 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from scanner_mcp.charts import generator
+from scanner_mcp.charts.comparison import (
+    price_overlay,
+    drawdown_comparison,
+    log_cycle,
+    ratio_chart,
+    relative_strength_chart,
+    sector_rotation_chart,
+)
+from scanner_mcp.charts.data import contiguous_true_spans, fib_x_padding, price_history_frames
+from scanner_mcp.charts.forward_returns import (
+    format_number,
+    forward_return_cell_color,
+    mix_rgb,
+    window_label,
+)
+from scanner_mcp.charts.fundamentals import fundamental_overlay
+from scanner_mcp.charts.params import as_bool, positive_int
+from scanner_mcp.charts.price_history import (
+    add_price_history_main_traces,
+    anchored_vwap,
+    price_history,
+)
+from scanner_mcp.data.fundamentals_utils import merge_asof_price_over_eps, statement_metric_series
 
 
 class FakeProvider:
@@ -38,10 +61,10 @@ class FakeProvider:
 
 class ChartGeneratorTest(unittest.TestCase):
     def test_dispatch_and_small_parsers(self) -> None:
-        self.assertTrue(generator._as_bool("yes"))
-        self.assertFalse(generator._as_bool("no"))
-        self.assertEqual(generator._positive_int("-5", 10), 10)
-        self.assertEqual(generator._positive_int("7", 10), 7)
+        self.assertTrue(as_bool("yes"))
+        self.assertFalse(as_bool("no"))
+        self.assertEqual(positive_int("-5", 10), 10)
+        self.assertEqual(positive_int("7", 10), 7)
 
         with self.assertRaises(ValueError):
             generator.generate_chart(FakeProvider({}), "missing", {})
@@ -51,7 +74,7 @@ class ChartGeneratorTest(unittest.TestCase):
             [10.0, 20.0, 30.0],
             index=pd.to_datetime(["2024-01-01", "2024-03-01", "2024-05-01"]),
         )
-        pe = generator._merge_asof_price_over_eps(
+        pe = merge_asof_price_over_eps(
             close,
             pd.to_datetime(["2024-02-01", "2024-04-01"]),
             np.array([2.0, -1.0]),
@@ -70,13 +93,13 @@ class ChartGeneratorTest(unittest.TestCase):
             index=["Total Revenue", "Net Income"],
         )
 
-        revenue = generator._statement_metric_series(stmt, "revenue")
-        earnings = generator._statement_metric_series(stmt, "earnings")
+        revenue = statement_metric_series(stmt, "revenue")
+        earnings = statement_metric_series(stmt, "earnings")
 
         self.assertEqual(list(revenue), [90.0, 100.0])
         self.assertEqual(list(earnings), [25.0, 30.0])
         with self.assertRaises(ValueError):
-            generator._statement_metric_series(stmt, "cashflow")
+            statement_metric_series(stmt, "cashflow")
 
     def test_anchored_vwap_respects_anchor_and_zero_volume(self) -> None:
         df = pd.DataFrame(
@@ -89,7 +112,7 @@ class ChartGeneratorTest(unittest.TestCase):
             index=pd.date_range("2024-01-01", periods=3),
         )
 
-        out = generator._anchored_vwap(df, "2024-01-02")
+        out = anchored_vwap(df, "2024-01-02")
 
         self.assertTrue(pd.isna(out.iloc[0]))
         self.assertTrue(pd.isna(out.iloc[1]))
@@ -99,12 +122,23 @@ class ChartGeneratorTest(unittest.TestCase):
         df = pd.DataFrame({"Close": [100.0, 110.0, 105.0]}, index=pd.date_range("2024-01-01", periods=3))
         provider = FakeProvider({"SPY": df, "QQQ": df, "BTC-USD": df})
 
-        with patch("scanner_mcp.charts.generator._fig_to_b64", return_value="pngdata") as render:
-            self.assertEqual(generator._price_overlay(provider, {"symbols": ["SPY", "QQQ"], "period": "1mo"})["data"], "pngdata")
-            self.assertEqual(generator._drawdown_comparison(provider, {"symbols": ["SPY"], "period": "1mo"})["data"], "pngdata")
-            self.assertEqual(generator._log_cycle(provider, {"symbol": "BTC-USD", "period": "max"})["data"], "pngdata")
+        with (
+            patch("scanner_mcp.charts.comparison.fig_to_b64", return_value="pngdata") as render,
+        ):
+            self.assertEqual(price_overlay(provider, {"symbols": ["SPY", "QQQ"], "period": "1mo"})["data"], "pngdata")
+            self.assertEqual(drawdown_comparison(provider, {"symbols": ["SPY"], "period": "1mo"})["data"], "pngdata")
+            self.assertEqual(log_cycle(provider, {"symbol": "BTC-USD", "period": "max"})["data"], "pngdata")
 
         self.assertEqual(render.call_count, 3)
+
+    def test_price_overlay_and_drawdown_reject_empty_symbol_data(self) -> None:
+        provider = FakeProvider({})
+
+        with self.assertRaisesRegex(ValueError, "no data available for requested symbols"):
+            price_overlay(provider, {"symbols": "SPY,QQQ", "period": "1mo"})
+
+        with self.assertRaisesRegex(ValueError, "no data available for requested symbols"):
+            drawdown_comparison(provider, {"symbols": "SPY", "period": "1mo"})
 
     def test_ratio_and_relative_strength_and_sector_rotation_render(self) -> None:
         index = pd.date_range("2024-01-01", periods=90, freq="D")
@@ -136,20 +170,20 @@ class ChartGeneratorTest(unittest.TestCase):
                 self.fail(f"unexpected chart type {chart_type}")
             return "pngdata"
 
-        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
+        with patch("scanner_mcp.charts.comparison.fig_to_b64", side_effect=fake_render):
             self.assertEqual(
-                generator._ratio_chart(provider, {"symbol": "SPY", "benchmark": "XLP", "period": "6mo"})["data"],
+                ratio_chart(provider, {"symbol": "SPY", "benchmark": "XLP", "period": "6mo"})["data"],
                 "pngdata",
             )
             self.assertEqual(
-                generator._relative_strength_chart(
+                relative_strength_chart(
                     provider,
                     {"symbol": "AAPL", "benchmark": "SPY", "period": "6mo", "ma_period": 10},
                 )["data"],
                 "pngdata",
             )
             self.assertEqual(
-                generator._sector_rotation_chart(
+                sector_rotation_chart(
                     provider,
                     {"symbols": ["XLK", "XLF", "XLE"], "period": "6mo", "return_window": 21},
                 )["data"],
@@ -182,8 +216,8 @@ class ChartGeneratorTest(unittest.TestCase):
 
         provider = FakeProvider({"XYZ": price})
         provider.fundamentals = fundamentals
-        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
-            result = generator._fundamental_overlay(provider, {"symbol": "XYZ", "metric": "revenue", "period": "1y"})
+        with patch("scanner_mcp.charts.fundamentals.fig_to_b64", side_effect=fake_render):
+            result = fundamental_overlay(provider, {"symbol": "XYZ", "metric": "revenue", "period": "1y"})
 
         self.assertEqual(result["data"], "pngdata")
 
@@ -200,7 +234,7 @@ class ChartGeneratorTest(unittest.TestCase):
         )
         fig = go.Figure()
 
-        generator._add_price_history_main_traces(
+        add_price_history_main_traces(
             fig,
             df,
             "XYZ",
@@ -227,7 +261,7 @@ class ChartGeneratorTest(unittest.TestCase):
         fib_trace = next(trace for trace in fig.data if trace.name == "Fib 0.618")
         self.assertFalse(fib_trace.showlegend)
         self.assertGreater(fib_trace.x[1], df.index[-1])
-        fib_range, fib_label_x = generator._fib_x_padding(df.index)
+        fib_range, fib_label_x = fib_x_padding(df.index)
         self.assertEqual(fib_trace.x[1], fib_label_x)
         self.assertLess(fib_trace.x[1], fib_range[1])
         fib_label = next(annotation for annotation in fig.layout.annotations if annotation.text == "0.618 11.29")
@@ -282,8 +316,8 @@ class ChartGeneratorTest(unittest.TestCase):
             self.assertFalse(pd.isna(pd.Series(sma.y)).any())
             return "pngdata"
 
-        with patch("scanner_mcp.charts.generator._fig_to_b64", side_effect=fake_render):
-            result = generator._price_history(provider, {"symbol": "XYZ", "period": "1mo", "show_ma": True, "ma_period": 5})
+        with patch("scanner_mcp.charts.price_history.fig_to_b64", side_effect=fake_render):
+            result = price_history(provider, {"symbol": "XYZ", "period": "1mo", "show_ma": True, "ma_period": 5})
 
         self.assertEqual(result["data"], "pngdata")
         self.assertEqual(len(provider.calls), 2)
@@ -316,7 +350,7 @@ class ChartGeneratorTest(unittest.TestCase):
         )
         fig = go.Figure()
 
-        generator._add_price_history_main_traces(
+        add_price_history_main_traces(
             fig,
             visible_df,
             "XYZ",
@@ -325,17 +359,17 @@ class ChartGeneratorTest(unittest.TestCase):
         )
 
         avwap = next(trace for trace in fig.data if trace.name == "aVWAP")
-        expected = generator._anchored_vwap(full_df, visible_index[0]).reindex(visible_index)
+        expected = anchored_vwap(full_df, visible_index[0]).reindex(visible_index)
         np.testing.assert_allclose(np.asarray(avwap.y, dtype=float), expected.to_numpy(dtype=float))
 
     def test_forward_return_color_helpers(self) -> None:
-        self.assertEqual(generator._window_label(21), "1 Month")
-        self.assertEqual(generator._window_label(7), "7d")
-        self.assertEqual(generator._format_number(3.0), "3")
-        self.assertEqual(generator._mix_rgb((255, 255, 255), (0, 0, 0), 0.5), "rgb(128,128,128)")
-        self.assertEqual(generator._forward_return_cell_color("Mean", None, []), "#ffffff")
-        self.assertNotEqual(generator._forward_return_cell_color("Mean", 5.0, [5.0]), "#ffffff")
-        self.assertNotEqual(generator._forward_return_cell_color("% Positive", 25.0, [25.0]), "#ffffff")
+        self.assertEqual(window_label(21), "1 Month")
+        self.assertEqual(window_label(7), "7d")
+        self.assertEqual(format_number(3.0), "3")
+        self.assertEqual(mix_rgb((255, 255, 255), (0, 0, 0), 0.5), "rgb(128,128,128)")
+        self.assertEqual(forward_return_cell_color("Mean", None, []), "#ffffff")
+        self.assertNotEqual(forward_return_cell_color("Mean", 5.0, [5.0]), "#ffffff")
+        self.assertNotEqual(forward_return_cell_color("% Positive", 25.0, [25.0]), "#ffffff")
 
     def test_contiguous_true_spans_groups_runs(self) -> None:
         mask = pd.Series(
@@ -343,7 +377,7 @@ class ChartGeneratorTest(unittest.TestCase):
             index=pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
         )
 
-        spans = generator._contiguous_true_spans(mask)
+        spans = contiguous_true_spans(mask)
 
         self.assertEqual(spans[0], (pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")))
         self.assertEqual(spans[1], (pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-05")))
