@@ -9,7 +9,8 @@ import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scanner_mcp.charts import generator as chartgen  # noqa: E402
+from scanner_mcp.charts.data import fib_x_padding  # noqa: E402
+from scanner_mcp.charts.price_history import add_price_history_main_traces, anchored_vwap  # noqa: E402
 
 
 class PriceHistoryChartTest(unittest.TestCase):
@@ -28,7 +29,7 @@ class PriceHistoryChartTest(unittest.TestCase):
         )
         fig = go.Figure()
 
-        chartgen._add_price_history_main_traces(
+        add_price_history_main_traces(
             fig,
             df,
             "XYZ",
@@ -53,7 +54,7 @@ class PriceHistoryChartTest(unittest.TestCase):
         fib_trace = next(trace for trace in fig.data if trace.name == "Fib 0.618")
         self.assertFalse(fib_trace.showlegend)
         self.assertGreater(fib_trace.x[1], dates[-1])
-        fib_range, fib_label_x = chartgen._fib_x_padding(dates)
+        fib_range, fib_label_x = fib_x_padding(dates)
         self.assertEqual(fib_trace.x[1], fib_label_x)
         self.assertLess(fib_trace.x[1], fib_range[1])
         fib_label = next(annotation for annotation in fig.layout.annotations if annotation.text == "0.618 190.83")
@@ -73,7 +74,7 @@ class PriceHistoryChartTest(unittest.TestCase):
             index=dates,
         )
 
-        out = chartgen._anchored_vwap(df, "2025-01-02")
+        out = anchored_vwap(df, "2025-01-02")
 
         self.assertTrue(pd.isna(out.iloc[0]))
         self.assertAlmostEqual(float(out.iloc[1]), 20.0)

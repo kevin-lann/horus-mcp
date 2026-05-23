@@ -7,6 +7,9 @@ from unittest.mock import patch
 import pandas as pd
 
 from scanner_mcp import server
+from scanner_mcp.charts import service as chart_service
+from scanner_mcp.market import service as market_service
+from scanner_mcp.signals import service as signals_service
 
 
 class FakeProvider:
@@ -23,20 +26,20 @@ class FakeProvider:
 
 class ServerHelpersTest(unittest.TestCase):
     def test_parse_ind_and_float_helpers(self) -> None:
-        self.assertEqual(server._parse_ind("rsi:10"), ("rsi", {"period": 10}))
-        self.assertEqual(server._parse_ind("ema:21"), ("ema", {"period": 21}))
-        self.assertEqual(server._parse_ind("macd"), ("macd", {}))
-        self.assertEqual(server._as_float("12.5"), 12.5)
-        self.assertIsNone(server._as_float(float("nan")))
-        self.assertIsNone(server._as_float("bad"))
+        self.assertEqual(market_service.parse_indicator("rsi:10"), ("rsi", {"period": 10}))
+        self.assertEqual(market_service.parse_indicator("ema:21"), ("ema", {"period": 21}))
+        self.assertEqual(market_service.parse_indicator("macd"), ("macd", {}))
+        self.assertEqual(market_service.as_float("12.5"), 12.5)
+        self.assertIsNone(market_service.as_float(float("nan")))
+        self.assertIsNone(market_service.as_float("bad"))
 
     def test_quote_snapshot_uses_fast_info_then_history_fallback(self) -> None:
         provider = FakeProvider({"last_price": 110.0, "previous_close": 100.0})
-        self.assertEqual(server._quote_snapshot(provider, "SPY")["day_change_pct"], 10.0)  # type: ignore[arg-type]
+        self.assertEqual(market_service.quote_snapshot(provider, "SPY")["day_change_pct"], 10.0)  # type: ignore[arg-type]
 
         hist = pd.DataFrame({"Close": [100.0, 105.0]})
         provider = FakeProvider({}, hist)
-        out = server._quote_snapshot(provider, "SPY")  # type: ignore[arg-type]
+        out = market_service.quote_snapshot(provider, "SPY")  # type: ignore[arg-type]
 
         self.assertEqual(out["last_price"], 105.0)
         self.assertEqual(out["previous_close"], 100.0)
@@ -51,8 +54,7 @@ class ServerHelpersTest(unittest.TestCase):
         )
         provider = FakeProvider(history=df)
 
-        with patch("scanner_mcp.server._get_provider", return_value=provider):
-            out = server._compute_indicators("spy", ["rsi:3", "sma:3", "unknown"], "6mo")
+        out = market_service.compute_indicators(provider, "spy", ["rsi:3", "sma:3", "unknown"], "6mo")
 
         self.assertEqual(out["symbol"], "SPY")
         self.assertIn("rsi_3", out)
@@ -62,22 +64,24 @@ class ServerHelpersTest(unittest.TestCase):
 
     def test_chart_tool_result_returns_json_error_for_bad_chart_response(self) -> None:
         with (
-            patch("scanner_mcp.server._get_provider", return_value=object()),
-            patch("scanner_mcp.server.chartgen.generate_chart", return_value={"mime": "image/png"}),
+            patch("scanner_mcp.charts.service.generate_chart", return_value={"mime": "image/png"}),
         ):
-            self.assertEqual(json.loads(server._chart_tool_result("x", {}))["error"], "chart response missing image data")
+            self.assertEqual(
+                json.loads(chart_service.chart_tool_result(object(), "x", {}))["error"],
+                "chart response missing image data",
+            )
 
         with (
-            patch("scanner_mcp.server._get_provider", return_value=object()),
-            patch("scanner_mcp.server.chartgen.generate_chart", side_effect=RuntimeError("boom")),
+            patch("scanner_mcp.charts.service.generate_chart", side_effect=RuntimeError("boom")),
         ):
-            self.assertEqual(json.loads(server._chart_tool_result("x", {}))["error"], "boom")
+            self.assertEqual(json.loads(chart_service.chart_tool_result(object(), "x", {}))["error"], "boom")
 
     def test_chart_fundamental_overlay_passes_params(self) -> None:
-        with patch("scanner_mcp.server._chart_tool_result", return_value="ok") as chart_tool:
+        with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
             self.assertEqual(server.chart_fundamental_overlay("msft", "earnings", "annual", "10y", "1d", "line"), "ok")
 
-        chart_tool.assert_called_once_with(
+        chart_tool.assert_called_once()
+        self.assertEqual(chart_tool.call_args.args[1:], (
             "fundamental_overlay",
             {
                 "symbol": "msft",
@@ -87,21 +91,21 @@ class ServerHelpersTest(unittest.TestCase):
                 "interval": "1d",
                 "price_style": "line",
             },
-        )
+        ))
 
     def test_new_chart_tools_pass_params(self) -> None:
-        with patch("scanner_mcp.server._chart_tool_result", return_value="ok") as chart_tool:
+        with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
             self.assertEqual(server.chart_ratio("spy", "xlp", "6mo"), "ok")
             self.assertEqual(server.chart_relative_strength("aapl", "spy", "3y", 30), "ok")
             self.assertEqual(server.chart_sector_rotation(["XLK", "XLF"], "5y", 42), "ok")
 
-        self.assertEqual(chart_tool.call_args_list[0].args, ("ratio_chart", {"symbol": "spy", "benchmark": "xlp", "period": "6mo"}))
+        self.assertEqual(chart_tool.call_args_list[0].args[1:], ("ratio_chart", {"symbol": "spy", "benchmark": "xlp", "period": "6mo"}))
         self.assertEqual(
-            chart_tool.call_args_list[1].args,
+            chart_tool.call_args_list[1].args[1:],
             ("relative_strength", {"symbol": "aapl", "benchmark": "spy", "period": "3y", "ma_period": 30}),
         )
         self.assertEqual(
-            chart_tool.call_args_list[2].args,
+            chart_tool.call_args_list[2].args[1:],
             ("sector_rotation", {"symbols": ["XLK", "XLF"], "period": "5y", "return_window": 42}),
         )
 
@@ -112,10 +116,9 @@ class ServerHelpersTest(unittest.TestCase):
                 return 42
 
         fake_store = FakeStore()
-        with patch("scanner_mcp.server._get_store", return_value=fake_store):
-            ok = json.loads(server.create_signal("Name", "rsi_oversold", {"threshold": 35}, "tickers", ["spy"], None))
-            bad = json.loads(server.create_signal("Name", "rsi_oversold", None, "watchlist", ["spy"], None))
-            ex_bad = json.loads(server.create_signal("Name", "rsi_oversold", None, "exchange", None, "BAD"))
+        ok = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", {"threshold": 35}, "tickers", ["spy"], None))
+        bad = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", None, "watchlist", ["spy"], None))
+        ex_bad = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", None, "exchange", None, "BAD"))
 
         self.assertEqual(ok["id"], 42)
         self.assertEqual(fake_store.args, ("Name", "rsi_oversold", {"threshold": 35}, ["SPY"], "tickers", None))

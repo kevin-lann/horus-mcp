@@ -15,6 +15,13 @@ import pandas as pd
 import yfinance as yf
 
 from scanner_mcp.data.cache import TTLCache
+from scanner_mcp.data.fundamentals_utils import (
+    empty_series,
+    merge_asof_price_over_eps,
+    series_from_alpha_vantage_rows,
+    source_series,
+    statement_metric_series,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,15 +79,6 @@ def _empty_df() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def _empty_series() -> pd.Series:
-    return pd.Series(dtype=float)
-
-
-def _source_series(values: pd.Series, source: str) -> pd.Series:
-    values.attrs["source"] = source
-    return values
-
-
 def _read_env_file_key() -> str | None:
     try:
         lines = _ENV_FILE_PATH.read_text(encoding="utf-8").splitlines()
@@ -106,83 +104,6 @@ def _statement_frequency(frequency: str) -> str:
     if freq in {"quarterly", "quarter", "q"}:
         return "quarterly"
     raise ValueError("frequency must be quarterly or annual")
-
-
-def _to_naive_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    idx = pd.DatetimeIndex(index)
-    if idx.tz is not None:
-        idx = idx.tz_convert("UTC").tz_localize(None)
-    return pd.DatetimeIndex(idx.normalize()).astype("datetime64[ns]")
-
-
-def _merge_asof_price_over_eps(
-    close: pd.Series,
-    anchor_dates: pd.DatetimeIndex,
-    eps_values: np.ndarray,
-) -> pd.Series:
-    df_sorted = close.sort_index().astype(float)
-    hist = pd.DataFrame(
-        {
-            "asof": _to_naive_dates(pd.DatetimeIndex(df_sorted.index)),
-            "close": df_sorted.values,
-        }
-    )
-    right = pd.DataFrame(
-        {
-            "anchor": _to_naive_dates(pd.DatetimeIndex(anchor_dates)),
-            "eps": eps_values.astype(float),
-        }
-    ).sort_values("anchor")
-    merged = pd.merge_asof(hist, right, left_on="asof", right_on="anchor", direction="backward")
-    denom = merged["eps"].to_numpy(dtype=float)
-    num = merged["close"].to_numpy(dtype=float)
-    pe_vals = np.where(np.isfinite(denom) & (denom > 0), num / denom, np.nan)
-    return pd.Series(pe_vals, index=df_sorted.index, dtype=float).reindex(close.index)
-
-
-def _series_from_alpha_vantage_rows(rows: list[dict[str, Any]], value_keys: tuple[str, ...]) -> pd.Series:
-    parsed: list[tuple[pd.Timestamp, float]] = []
-    for row in rows:
-        raw_date = row.get("fiscalDateEnding") or row.get("reportedDate")
-        if raw_date is None:
-            continue
-        date = pd.to_datetime(raw_date, errors="coerce")
-        if pd.isna(date):
-            continue
-        for key in value_keys:
-            if key not in row:
-                continue
-            value = pd.to_numeric(row.get(key), errors="coerce")
-            if pd.notna(value):
-                parsed.append((pd.Timestamp(date), float(value)))
-                break
-    if not parsed:
-        return _empty_series()
-    out = pd.Series({date: value for date, value in parsed}, dtype=float).sort_index()
-    out.index = pd.DatetimeIndex(out.index)
-    return out
-
-
-def _statement_metric_series(stmt: pd.DataFrame, metric: str) -> pd.Series:
-    if stmt is None or stmt.empty:
-        return _empty_series()
-    metric_key = str(metric).strip().lower()
-    row_candidates = {
-        "revenue": ("Total Revenue", "Operating Revenue"),
-        "earnings": (
-            "Net Income",
-            "Net Income Common Stockholders",
-            "Net Income From Continuing Operation Net Minority Interest",
-        ),
-    }
-    if metric_key not in row_candidates:
-        raise ValueError("metric must be revenue or earnings")
-    for row_name in row_candidates[metric_key]:
-        if row_name in stmt.index:
-            out = stmt.loc[row_name].dropna().sort_index().astype(float)
-            out.index = pd.DatetimeIndex(out.index)
-            return out
-    return _empty_series()
 
 
 class YFinanceProvider(DataProvider):
@@ -292,15 +213,15 @@ class YFinanceProvider(DataProvider):
                 raise ValueError("frequency must be quarterly or annual")
         except Exception as e:  # noqa: BLE001
             log.exception("Yahoo income statement failed %s %s: %s", sym, frequency, e)
-            return _empty_series()
-        out = _statement_metric_series(stmt, metric)
-        return _source_series(out, "Yahoo") if not out.empty else out
+            return empty_series()
+        out = statement_metric_series(stmt, metric)
+        return source_series(out, "Yahoo") if not out.empty else out
 
     def _yahoo_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
         pe_q = self._yahoo_quarterly_ttm_pe_series(symbol, close)
         pe_a = self._yahoo_annual_fy_eps_pe_series(symbol, close)
         out = pe_q.combine_first(pe_a)
-        return _source_series(out, "Yahoo EPS fallback")
+        return source_series(out, "Yahoo EPS fallback")
 
     def _yahoo_quarterly_ttm_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
         sym = symbol.strip().upper()
@@ -323,7 +244,7 @@ class YFinanceProvider(DataProvider):
         ttm = qeps.rolling(window=4, min_periods=4).sum().dropna()
         if ttm.empty:
             return pd.Series(np.nan, index=close.index, dtype=float)
-        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
+        return merge_asof_price_over_eps(close, pd.DatetimeIndex(ttm.index), ttm.values)
 
     def _yahoo_annual_fy_eps_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
         sym = symbol.strip().upper()
@@ -343,7 +264,7 @@ class YFinanceProvider(DataProvider):
         fy = fy.dropna().sort_index().astype(float)
         if fy.empty:
             return pd.Series(np.nan, index=close.index, dtype=float)
-        return _merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
+        return merge_asof_price_over_eps(close, pd.DatetimeIndex(fy.index), fy.values)
 
 
 class AlphaVantageProvider(FundamentalsProvider):
@@ -397,9 +318,9 @@ class AlphaVantageProvider(FundamentalsProvider):
         rows_raw = payload.get(report_key, [])
         rows = [row for row in rows_raw if isinstance(row, dict)] if isinstance(rows_raw, list) else []
         value_keys = ("totalRevenue",) if metric == "revenue" else ("netIncome",)
-        series = _series_from_alpha_vantage_rows(rows, value_keys)
+        series = series_from_alpha_vantage_rows(rows, value_keys)
         if not series.empty:
-            series = _source_series(series, "Alpha Vantage")
+            series = source_series(series, "Alpha Vantage")
             self._fundamentals_cache.set(cache_key, series, ttl=_FUNDAMENTALS_TTL)
         return series.copy()
 
@@ -415,16 +336,16 @@ class AlphaVantageProvider(FundamentalsProvider):
             report_key = "annualEarnings" if period == "annual" else "quarterlyEarnings"
             rows_raw = payload.get(report_key, [])
             rows = [row for row in rows_raw if isinstance(row, dict)] if isinstance(rows_raw, list) else []
-            eps = _series_from_alpha_vantage_rows(rows, ("reportedEPS",))
+            eps = series_from_alpha_vantage_rows(rows, ("reportedEPS",))
             if period == "quarterly" and len(eps) >= 4:
                 eps = eps.rolling(window=4, min_periods=4).sum().dropna()
             if not eps.empty:
-                eps = _source_series(eps, "Alpha Vantage EPS")
+                eps = source_series(eps, "Alpha Vantage EPS")
                 self._fundamentals_cache.set(cache_key, eps, ttl=_FUNDAMENTALS_TTL)
         if eps.empty:
-            return _empty_series()
-        pe = _merge_asof_price_over_eps(close, pd.DatetimeIndex(eps.index), eps.to_numpy(dtype=float))
-        return _source_series(pe, "Alpha Vantage EPS")
+            return empty_series()
+        pe = merge_asof_price_over_eps(close, pd.DatetimeIndex(eps.index), eps.to_numpy(dtype=float))
+        return source_series(pe, "Alpha Vantage EPS")
 
     def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
         metric_key = str(metric).strip().lower()
@@ -477,10 +398,10 @@ class CompositeDataProvider(DataProvider):
             series = provider.get_fundamental_series(symbol, metric, frequency)
             if not series.empty:
                 return series
-        return _empty_series()
+        return empty_series()
 
     def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
-        fallback = _empty_series()
+        fallback = empty_series()
         for provider in self._fundamentals_providers:
             series = provider.get_historical_pe_series(symbol, close)
             if series.empty:
