@@ -89,6 +89,22 @@ class ServerHelpersTest(unittest.TestCase):
             },
         )
 
+    def test_new_chart_tools_pass_params(self) -> None:
+        with patch("scanner_mcp.server._chart_tool_result", return_value="ok") as chart_tool:
+            self.assertEqual(server.chart_ratio("spy", "xlp", "6mo"), "ok")
+            self.assertEqual(server.chart_relative_strength("aapl", "spy", "3y", 30), "ok")
+            self.assertEqual(server.chart_sector_rotation(["XLK", "XLF"], "5y", 42), "ok")
+
+        self.assertEqual(chart_tool.call_args_list[0].args, ("ratio_chart", {"symbol": "spy", "benchmark": "xlp", "period": "6mo"}))
+        self.assertEqual(
+            chart_tool.call_args_list[1].args,
+            ("relative_strength", {"symbol": "aapl", "benchmark": "spy", "period": "3y", "ma_period": 30}),
+        )
+        self.assertEqual(
+            chart_tool.call_args_list[2].args,
+            ("sector_rotation", {"symbols": ["XLK", "XLF"], "period": "5y", "return_window": 42}),
+        )
+
     def test_create_signal_validates_scope_arguments_and_persists(self) -> None:
         class FakeStore:
             def signal_create(self, name, signal_type, params, ticker_overrides, ticker_scope, exchange):  # noqa: ANN001
