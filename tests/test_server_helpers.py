@@ -121,6 +121,41 @@ class ServerHelpersTest(unittest.TestCase):
             },
         ))
 
+    def test_new_chart_tools_pass_new_params(self) -> None:
+        with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
+            self.assertEqual(server.chart_fundamental_momentum("aapl", "annual", "10y", "1d", "earnings_growth", "line"), "ok")
+            self.assertEqual(server.chart_basket_breadth(["AAPL", "MSFT"], "QQQ", "2y", 20, 42), "ok")
+            self.assertEqual(server.chart_pairs_spread("ko", "pep", "3y", "price_spread", 30), "ok")
+
+        self.assertEqual(
+            chart_tool.call_args_list[0].args[1:],
+            (
+                "fundamental_momentum",
+                {
+                    "symbol": "aapl",
+                    "frequency": "annual",
+                    "period": "10y",
+                    "interval": "1d",
+                    "profitability_metric": "earnings_growth",
+                    "price_style": "line",
+                },
+            ),
+        )
+        self.assertEqual(
+            chart_tool.call_args_list[1].args[1:],
+            (
+                "basket_breadth",
+                {"symbols": ["AAPL", "MSFT"], "benchmark": "QQQ", "period": "2y", "sma_period": 20, "corr_window": 42},
+            ),
+        )
+        self.assertEqual(
+            chart_tool.call_args_list[2].args[1:],
+            (
+                "pairs_spread",
+                {"symbol": "ko", "benchmark": "pep", "period": "3y", "spread_mode": "price_spread", "z_window": 30},
+            ),
+        )
+
     def test_new_chart_tools_pass_params(self) -> None:
         with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
             self.assertEqual(server.chart_ratio("spy", "xlp", "6mo"), "ok")
@@ -135,6 +170,33 @@ class ServerHelpersTest(unittest.TestCase):
         self.assertEqual(
             chart_tool.call_args_list[2].args[1:],
             ("sector_rotation", {"symbols": ["XLK", "XLF"], "period": "5y", "return_window": 42}),
+        )
+
+    def test_chart_forward_returns_passes_signal_dates(self) -> None:
+        with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
+            self.assertEqual(
+                server.chart_forward_returns(
+                    "spy",
+                    "rsi_oversold",
+                    [5, 21],
+                    {"period": 10, "threshold": 35},
+                    ["2024-01-13", "2024-02-10"],
+                ),
+                "ok",
+            )
+
+        self.assertEqual(
+            chart_tool.call_args.args[1:],
+            (
+                "forward_returns",
+                {
+                    "symbol": "spy",
+                    "event_type": "rsi_oversold",
+                    "windows": [5, 21],
+                    "event_params": {"period": 10, "threshold": 35},
+                    "signal_dates": ["2024-01-13", "2024-02-10"],
+                },
+            ),
         )
 
     def test_create_signal_validates_scope_arguments_and_persists(self) -> None:

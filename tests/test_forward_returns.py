@@ -14,6 +14,7 @@ from scanner_mcp.research.forward_returns import (  # noqa: E402
     ForwardStudy,
     ForwardWindowResult,
     SignalEvent,
+    compute_custom_date_forward_study_from_history,
     compute_event_forward_study_from_history,
     summarize_forward_study,
 )
@@ -76,6 +77,25 @@ class ForwardReturnsTest(unittest.TestCase):
 
         self.assertEqual(list(study.events[0].windows), [1])
         self.assertEqual(summarize_forward_study(study)[3]["n"], 0)
+
+    def test_custom_signal_dates_map_to_next_trading_session_and_dedupe(self) -> None:
+        df = pd.DataFrame(
+            {"Close": [100.0, 103.0, 107.0, 111.0]},
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-08", "2024-01-09"]),
+        )
+
+        study = compute_custom_date_forward_study_from_history(
+            df,
+            "XYZ",
+            ["2024-01-01", "2024-01-06", "2024-01-08"],
+            [1],
+        )
+
+        self.assertEqual([ev.index for ev in study.events], [0, 2])
+        self.assertEqual([str(ev.date.date()) for ev in study.events], ["2024-01-02", "2024-01-08"])
+        self.assertEqual([ev.label for ev in study.events], ["Custom Signal", "Custom Signal"])
+        self.assertAlmostEqual(study.events[0].windows[1].final_return, 3.0)
+        self.assertAlmostEqual(study.events[1].windows[1].final_return, (111.0 - 107.0) / 107.0 * 100.0)
 
     def test_rsi_crossing_detector_finds_threshold_events(self) -> None:
         df = pd.DataFrame(

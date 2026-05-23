@@ -241,11 +241,11 @@ class YFinanceProviderTest(unittest.TestCase):
         self.assertEqual(float(pe.iloc[2]), 150.0 / 4.5)
         self.assertEqual(pe.attrs["source"], "Alpha Vantage EPS")
 
-    def test_composite_prefers_first_non_empty_fundamentals_provider(self) -> None:
+    def test_composite_prefers_richest_fundamentals_provider(self) -> None:
         empty = pd.Series(dtype=float)
         alpha = pd.Series([1.0], index=pd.to_datetime(["2024-01-01"]))
         alpha.attrs["source"] = "Alpha"
-        yahoo = pd.Series([2.0], index=pd.to_datetime(["2024-01-01"]))
+        yahoo = pd.Series([2.0, 3.0, 4.0], index=pd.to_datetime(["2023-07-01", "2023-10-01", "2024-01-01"]))
         yahoo.attrs["source"] = "Yahoo"
 
         class FakeFundamentals:
@@ -262,8 +262,39 @@ class YFinanceProviderTest(unittest.TestCase):
 
         out = provider.get_fundamental_series("AAPL", "revenue", "quarterly")
 
-        self.assertEqual(list(out), [1.0])
-        self.assertEqual(out.attrs["source"], "Alpha")
+        self.assertEqual(list(out), [2.0, 3.0, 4.0])
+        self.assertEqual(out.attrs["source"], "Yahoo")
+
+    def test_composite_fundamental_bundle_prefers_matched_provider_overlap(self) -> None:
+        alpha_revenue = pd.Series([100.0] * 5, index=pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31"]))
+        alpha_revenue.attrs["source"] = "Alpha"
+        alpha_earnings = pd.Series(dtype=float)
+        yahoo_revenue = pd.Series([90.0] * 8, index=pd.date_range("2022-06-30", periods=8, freq="QE"))
+        yahoo_revenue.attrs["source"] = "Yahoo"
+        yahoo_earnings = pd.Series([9.0] * 8, index=pd.date_range("2022-06-30", periods=8, freq="QE"))
+        yahoo_earnings.attrs["source"] = "Yahoo"
+
+        class FakeFundamentals:
+            def __init__(self, revenue: pd.Series, earnings: pd.Series) -> None:
+                self.revenue = revenue
+                self.earnings = earnings
+
+            def get_fundamental_series(self, _symbol: str, metric: str, _frequency: str) -> pd.Series:
+                return self.revenue if metric == "revenue" else self.earnings
+
+            def get_historical_pe_series(self, _symbol: str, _close: pd.Series) -> pd.Series:
+                return pd.Series(dtype=float)
+
+        provider = CompositeDataProvider(
+            object(),
+            [FakeFundamentals(alpha_revenue, alpha_earnings), FakeFundamentals(yahoo_revenue, yahoo_earnings)],
+        )  # type: ignore[arg-type]
+
+        out = provider.get_fundamental_bundle("AAPL", ["revenue", "earnings"], "quarterly")
+
+        self.assertEqual(len(out["revenue"]), 8)
+        self.assertEqual(len(out["earnings"]), 8)
+        self.assertEqual(out["revenue"].attrs["source"], "Yahoo")
 
     def test_composite_pe_returns_first_finite_series_or_last_fallback(self) -> None:
         close = pd.Series([10.0], index=pd.to_datetime(["2024-01-01"]))

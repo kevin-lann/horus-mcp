@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -168,6 +168,50 @@ def _clean_windows(windows: list[int]) -> list[int]:
     return out
 
 
+def _coerce_signal_dates(signal_dates: Iterable[Any]) -> list[pd.Timestamp]:
+    """Parse and deduplicate user-supplied signal dates."""
+    out: list[pd.Timestamp] = []
+    seen: set[pd.Timestamp] = set()
+    for raw in signal_dates:
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(parsed):
+            raise ValueError(f"Invalid signal date: {raw}")
+        ts = pd.Timestamp(parsed).normalize().tz_localize(None)
+        if ts in seen:
+            continue
+        seen.add(ts)
+        out.append(ts)
+    return sorted(out)
+
+
+def _resolve_custom_events(
+    close: pd.Series,
+    signal_dates: Iterable[Any],
+    *,
+    label: str = "Custom Signal",
+) -> list[SignalEvent]:
+    """Map requested calendar dates onto the next available trading session."""
+    if close.empty:
+        return []
+    requested = _coerce_signal_dates(signal_dates)
+    if not requested:
+        return []
+
+    trading_index = pd.DatetimeIndex(pd.to_datetime(close.index)).tz_localize(None).normalize()
+    out: list[SignalEvent] = []
+    seen_indexes: set[int] = set()
+    for requested_date in requested:
+        position = trading_index.searchsorted(requested_date, side="left")
+        if position >= len(trading_index):
+            continue
+        idx = int(position)
+        if idx in seen_indexes:
+            continue
+        seen_indexes.add(idx)
+        out.append(SignalEvent(index=idx, label=label))
+    return out
+
+
 def compute_event_forward_study_from_history(
     df: pd.DataFrame,
     symbol: str,
@@ -228,6 +272,47 @@ def compute_event_forward_study_from_history(
             )
 
     return ForwardStudy(symbol=symbol, event_type=event_type, windows=w_int, price=close, events=events)
+
+
+def compute_custom_date_forward_study_from_history(
+    df: pd.DataFrame,
+    symbol: str,
+    signal_dates: list[Any],
+    windows: list[int],
+    *,
+    label: str = "Custom Signal",
+) -> ForwardStudy:
+    """Compute forward returns for user-supplied signal dates."""
+    w_int = _clean_windows(windows)
+    if df is None or df.empty or "Close" not in df.columns:
+        return ForwardStudy(symbol=symbol, event_type="custom_dates", windows=w_int, price=pd.Series(dtype=float), events=[])
+
+    synthetic_detector: dict[str, Detector] = {
+        "custom_dates": lambda frame, _: _resolve_custom_events(frame["Close"].astype(float), signal_dates, label=label)
+    }
+    return compute_event_forward_study_from_history(
+        df,
+        symbol,
+        "custom_dates",
+        w_int,
+        params=None,
+        detectors=synthetic_detector,
+    )
+
+
+def compute_custom_date_forward_study(
+    provider: DataProvider,
+    symbol: str,
+    signal_dates: list[Any],
+    windows: list[int] | None = None,
+    period: str = "10y",
+    *,
+    label: str = "Custom Signal",
+) -> ForwardStudy:
+    """Compute forward returns for explicit signal dates instead of detector-derived events."""
+    w_int = _clean_windows(windows or DEFAULT_FORWARD_WINDOWS)
+    df = provider.get_history(symbol, period=period, interval="1d")
+    return compute_custom_date_forward_study_from_history(df, symbol, signal_dates, w_int, label=label)
 
 
 def compute_event_forward_study(

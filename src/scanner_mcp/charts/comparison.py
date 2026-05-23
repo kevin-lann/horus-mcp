@@ -160,3 +160,121 @@ def log_cycle(provider: DataProvider, params: dict[str, object]) -> dict[str, st
     fig = go.Figure(data=[go.Scatter(x=df.index, y=y, name=symbol, mode="lines")])
     fig.update_layout(title=f"{symbol} log10(close) weekly", yaxis_title="log10 price")
     return {"mime": "image/png", "data": fig_to_b64(fig, "log_cycle")}
+
+
+def basket_breadth_chart(provider: DataProvider, params: dict[str, object]) -> dict[str, str]:
+    """Compare an equal-weight basket against a benchmark with breadth panels."""
+    raw_symbols = params.get("symbols") or ["AAPL", "MSFT", "NVDA", "GOOGL", "META"]
+    if isinstance(raw_symbols, str):
+        symbols = [symbol.strip().upper() for symbol in raw_symbols.split(",") if symbol.strip()]
+    else:
+        symbols = [str(symbol).strip().upper() for symbol in raw_symbols if str(symbol).strip()]
+    if len(symbols) < 2:
+        raise ValueError("symbols must contain at least two basket members")
+    benchmark = str(params.get("benchmark", "QQQ")).strip().upper()
+    period = str(params.get("period", "1y"))
+    sma_period = positive_int(params.get("sma_period", 50), 50)
+    corr_window = positive_int(params.get("corr_window", 63), 63)
+
+    closes = aligned_close_frame(provider, [*symbols, benchmark], period)
+    basket_closes = closes[symbols]
+    basket_returns = basket_closes.pct_change().fillna(0.0).mean(axis=1)
+    benchmark_returns = closes[benchmark].pct_change().fillna(0.0)
+    basket_index = ((1.0 + basket_returns).cumprod() * 100.0).rename("Basket")
+    benchmark_index = normalize_to_100(closes[benchmark]).rename(benchmark)
+    rolling_corr = basket_returns.rolling(corr_window).corr(benchmark_returns).dropna()
+    if rolling_corr.empty:
+        raise ValueError(f"Not enough data to compute {corr_window}-day rolling correlation")
+
+    members_above = (basket_closes >= basket_closes.rolling(sma_period).mean()).sum(axis=1).dropna()
+    if members_above.empty:
+        raise ValueError(f"Not enough data to compute breadth above {sma_period}-day SMA")
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.44, 0.24, 0.32],
+    )
+    fig.add_trace(go.Scatter(x=basket_index.index, y=basket_index.values, name="Equal-weight basket", mode="lines", line={"color": "#111827", "width": 2.2}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=benchmark_index.index, y=benchmark_index.values, name=benchmark, mode="lines", line={"color": "#2563eb", "width": 1.8}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=rolling_corr.index, y=rolling_corr.values, name=f"{corr_window}D correlation", mode="lines", line={"color": "#7c3aed", "width": 1.8}), row=2, col=1)
+    fig.add_hline(y=0.0, line={"color": "rgba(15,23,42,0.2)", "dash": "dot"}, row=2, col=1)
+    fig.add_trace(go.Bar(x=members_above.index, y=members_above.values, name=f"Members above {sma_period}D SMA", marker={"color": "#059669"}), row=3, col=1)
+    fig.add_hline(y=len(symbols) / 2.0, line={"color": "rgba(5,150,105,0.25)", "dash": "dash"}, row=3, col=1)
+
+    fig.update_layout(
+        title=f"Basket breadth vs {benchmark}",
+        height=920,
+        margin={"l": 60, "r": 52, "t": 78, "b": 46},
+        legend={"orientation": "h", "x": 0.01, "xanchor": "left", "y": 1.03, "yanchor": "top"},
+        hovermode="x unified",
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        bargap=0.08,
+    )
+    for row in range(1, 4):
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.06)", zeroline=False, row=row, col=1)
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=True, zerolinecolor="rgba(15,23,42,0.12)", row=row, col=1)
+    fig.update_yaxes(title_text="Normalized (base=100)", row=1, col=1)
+    fig.update_yaxes(title_text="Correlation", row=2, col=1)
+    fig.update_yaxes(title_text="Breadth Count", row=3, col=1, range=[0, len(symbols) + 0.5])
+    fig.update_xaxes(title_text="Date", row=3, col=1)
+    return {"mime": "image/png", "data": fig_to_b64(fig, "basket_breadth")}
+
+
+def pairs_spread_chart(provider: DataProvider, params: dict[str, object]) -> dict[str, str]:
+    """Show normalized pair prices, ratio/spread, and a z-score panel."""
+    symbol = str(params.get("symbol", "KO")).strip().upper()
+    benchmark = str(params.get("benchmark", "PEP")).strip().upper()
+    period = str(params.get("period", "1y"))
+    spread_mode = str(params.get("spread_mode", "ratio")).strip().lower()
+    z_window = positive_int(params.get("z_window", 63), 63)
+    if spread_mode not in {"ratio", "price_spread"}:
+        raise ValueError("spread_mode must be ratio or price_spread")
+
+    closes = aligned_close_frame(provider, [symbol, benchmark], period)
+    lhs = closes[symbol]
+    rhs = closes[benchmark]
+    normalized_lhs = normalize_to_100(lhs)
+    normalized_rhs = normalize_to_100(rhs)
+    spread = (lhs / rhs) if spread_mode == "ratio" else (lhs - rhs)
+    spread_name = f"{symbol}/{benchmark}" if spread_mode == "ratio" else f"{symbol}-{benchmark}"
+    rolling_mean = spread.rolling(z_window).mean()
+    rolling_std = spread.rolling(z_window).std(ddof=0).replace(0.0, np.nan)
+    zscore = ((spread - rolling_mean) / rolling_std).dropna()
+    if zscore.empty:
+        raise ValueError(f"Not enough data to compute {z_window}-day z-score")
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.42, 0.26, 0.32],
+    )
+    fig.add_trace(go.Scatter(x=normalized_lhs.index, y=normalized_lhs.values, name=symbol, mode="lines", line={"color": "#111827", "width": 2.0}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=normalized_rhs.index, y=normalized_rhs.values, name=benchmark, mode="lines", line={"color": "#2563eb", "width": 1.8}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=spread.index, y=spread.values, name=spread_name, mode="lines", line={"color": "#b45309", "width": 1.8}), row=2, col=1)
+    fig.add_trace(go.Scatter(x=zscore.index, y=zscore.values, name=f"{z_window}D z-score", mode="lines", line={"color": "#7c3aed", "width": 1.8}), row=3, col=1)
+    for level, color in ((2.0, "#b91c1c"), (0.0, "#475569"), (-2.0, "#15803d")):
+        fig.add_hline(y=level, line={"color": color, "dash": "dash"}, row=3, col=1)
+
+    fig.update_layout(
+        title=f"Pairs spread: {symbol} vs {benchmark}",
+        height=900,
+        margin={"l": 60, "r": 48, "t": 78, "b": 46},
+        legend={"orientation": "h", "x": 0.01, "xanchor": "left", "y": 1.03, "yanchor": "top"},
+        hovermode="x unified",
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+    )
+    for row in range(1, 4):
+        fig.update_xaxes(showgrid=True, gridcolor="rgba(15,23,42,0.06)", zeroline=False, row=row, col=1)
+        fig.update_yaxes(showgrid=True, gridcolor="rgba(15,23,42,0.08)", zeroline=True, zerolinecolor="rgba(15,23,42,0.12)", row=row, col=1)
+    fig.update_yaxes(title_text="Normalized (base=100)", row=1, col=1)
+    fig.update_yaxes(title_text=spread_name, row=2, col=1)
+    fig.update_yaxes(title_text="Z-score", row=3, col=1)
+    fig.update_xaxes(title_text="Date", row=3, col=1)
+    return {"mime": "image/png", "data": fig_to_b64(fig, "pairs_spread")}

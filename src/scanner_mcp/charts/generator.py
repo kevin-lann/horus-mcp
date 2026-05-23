@@ -5,15 +5,17 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from scanner_mcp.charts.comparison import (
+    basket_breadth_chart,
     drawdown_comparison,
     log_cycle,
+    pairs_spread_chart,
     price_overlay,
     ratio_chart,
     relative_strength_chart,
     sector_rotation_chart,
 )
 from scanner_mcp.charts.forward_returns import forward_returns_chart
-from scanner_mcp.charts.fundamentals import fundamental_overlay
+from scanner_mcp.charts.fundamentals import fundamental_momentum, fundamental_overlay
 from scanner_mcp.charts.price_history import price_history
 from scanner_mcp.data.provider import DataProvider
 
@@ -26,9 +28,12 @@ _CHART_BUILDERS: dict[str, ChartBuilder] = {
     "relative_strength": relative_strength_chart,
     "sector_rotation": sector_rotation_chart,
     "fundamental_overlay": fundamental_overlay,
+    "fundamental_momentum": fundamental_momentum,
     "forward_returns": forward_returns_chart,
     "drawdown_comparison": drawdown_comparison,
     "log_cycle": log_cycle,
+    "basket_breadth": basket_breadth_chart,
+    "pairs_spread": pairs_spread_chart,
 }
 
 

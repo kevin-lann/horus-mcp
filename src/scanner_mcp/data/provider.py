@@ -46,6 +46,10 @@ class FundamentalsProvider(ABC):
         """Return P/E history aligned to a close-price series."""
         ...
 
+    def get_fundamental_bundle(self, symbol: str, metrics: list[str], frequency: str) -> dict[str, pd.Series]:
+        """Return multiple fundamental series, defaulting to independent metric fetches."""
+        return {metric: self.get_fundamental_series(symbol, metric, frequency) for metric in metrics}
+
 
 class DataProvider(FundamentalsProvider, ABC):
     """Interface used by tools, charts, and scans to fetch market data."""
@@ -196,23 +200,39 @@ class YFinanceProvider(DataProvider):
             raise ValueError("metric must be revenue or earnings")
         return self._yahoo_fundamental_series(symbol, metric_key, frequency)
 
+    def get_fundamental_bundle(self, symbol: str, metrics: list[str], frequency: str) -> dict[str, pd.Series]:
+        """Fetch multiple Yahoo fundamental series from one statement payload."""
+        stmt = self._yahoo_income_statement(symbol, frequency)
+        if stmt is None or stmt.empty:
+            return {metric: empty_series() for metric in metrics}
+        bundle: dict[str, pd.Series] = {}
+        for metric in metrics:
+            series = statement_metric_series(stmt, metric)
+            bundle[metric] = source_series(series, "Yahoo") if not series.empty else series
+        return bundle
+
     def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
         """Fetch Yahoo EPS-derived historical P/E."""
         return self._yahoo_historical_pe_series(symbol, close)
 
-    def _yahoo_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+    def _yahoo_income_statement(self, symbol: str, frequency: str) -> pd.DataFrame:
         sym = symbol.strip().upper()
         freq = str(frequency).strip().lower()
         ticker = yf.Ticker(sym)
         try:
             if freq in {"annual", "yearly", "year"}:
-                stmt = ticker.incomestmt
+                return ticker.incomestmt
             elif freq in {"quarterly", "quarter", "q"}:
-                stmt = ticker.quarterly_incomestmt
+                return ticker.quarterly_incomestmt
             else:
                 raise ValueError("frequency must be quarterly or annual")
         except Exception as e:  # noqa: BLE001
             log.exception("Yahoo income statement failed %s %s: %s", sym, frequency, e)
+            return pd.DataFrame()
+
+    def _yahoo_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        stmt = self._yahoo_income_statement(symbol, frequency)
+        if stmt is None or stmt.empty:
             return empty_series()
         out = statement_metric_series(stmt, metric)
         return source_series(out, "Yahoo") if not out.empty else out
@@ -307,22 +327,30 @@ class AlphaVantageProvider(FundamentalsProvider):
         return payload
 
     def _alpha_vantage_income_statement_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        bundle = self.get_fundamental_bundle(symbol, [metric], frequency)
+        return bundle.get(metric, empty_series()).copy()
+
+    def get_fundamental_bundle(self, symbol: str, metrics: list[str], frequency: str) -> dict[str, pd.Series]:
         sym = symbol.strip().upper()
         period = _statement_frequency(frequency)
-        cache_key = ("alpha-vantage-income-series", sym, metric, period)
-        hit = self._fundamentals_cache.get(cache_key)
-        if hit is not None:
-            return hit.copy()
         payload = self._alpha_vantage_get("INCOME_STATEMENT", sym)
         report_key = "annualReports" if period == "annual" else "quarterlyReports"
         rows_raw = payload.get(report_key, [])
         rows = [row for row in rows_raw if isinstance(row, dict)] if isinstance(rows_raw, list) else []
-        value_keys = ("totalRevenue",) if metric == "revenue" else ("netIncome",)
-        series = series_from_alpha_vantage_rows(rows, value_keys)
-        if not series.empty:
-            series = source_series(series, "Alpha Vantage")
-            self._fundamentals_cache.set(cache_key, series, ttl=_FUNDAMENTALS_TTL)
-        return series.copy()
+        out: dict[str, pd.Series] = {}
+        for metric in metrics:
+            cache_key = ("alpha-vantage-income-series", sym, metric, period)
+            hit = self._fundamentals_cache.get(cache_key)
+            if hit is not None:
+                out[metric] = hit.copy()
+                continue
+            value_keys = ("totalRevenue",) if metric == "revenue" else ("netIncome",)
+            series = series_from_alpha_vantage_rows(rows, value_keys)
+            if not series.empty:
+                series = source_series(series, "Alpha Vantage")
+                self._fundamentals_cache.set(cache_key, series, ttl=_FUNDAMENTALS_TTL)
+            out[metric] = series.copy()
+        return out
 
     def _alpha_vantage_historical_pe_series(self, symbol: str, close: pd.Series, frequency: str) -> pd.Series:
         sym = symbol.strip().upper()
@@ -394,11 +422,43 @@ class CompositeDataProvider(DataProvider):
         return self._market_provider.get_option_chain(symbol, expiry)
 
     def get_fundamental_series(self, symbol: str, metric: str, frequency: str) -> pd.Series:
+        best = empty_series()
+        best_score = -1
         for provider in self._fundamentals_providers:
             series = provider.get_fundamental_series(symbol, metric, frequency)
-            if not series.empty:
-                return series
-        return empty_series()
+            if series.empty:
+                continue
+            finite_count = int(np.isfinite(series.to_numpy(dtype=float)).sum())
+            score = max(finite_count, len(series))
+            if score > best_score:
+                best = series
+                best_score = score
+        return best
+
+    def get_fundamental_bundle(self, symbol: str, metrics: list[str], frequency: str) -> dict[str, pd.Series]:
+        """Return a matched set of fundamentals from the single best underlying provider."""
+        best_bundle: dict[str, pd.Series] = {}
+        best_score = -1
+        for provider in self._fundamentals_providers:
+            bundle_fn = getattr(provider, "get_fundamental_bundle", None)
+            bundle = bundle_fn(symbol, metrics, frequency) if callable(bundle_fn) else {metric: provider.get_fundamental_series(symbol, metric, frequency) for metric in metrics}
+            if all(series.empty for series in bundle.values()):
+                continue
+            counts = [int(np.isfinite(series.to_numpy(dtype=float)).sum()) for series in bundle.values()]
+            overlap = 0
+            non_empty = [series for series in bundle.values() if not series.empty]
+            if len(non_empty) >= 2:
+                shared_index = pd.Index(non_empty[0].index)
+                for series in non_empty[1:]:
+                    shared_index = shared_index.intersection(series.index)
+                overlap = int(len(shared_index))
+            score = (overlap * 1000) + (min(counts, default=0) * 10) + sum(counts)
+            if score > best_score:
+                best_bundle = bundle
+                best_score = score
+        if best_bundle:
+            return best_bundle
+        return {metric: empty_series() for metric in metrics}
 
     def get_historical_pe_series(self, symbol: str, close: pd.Series) -> pd.Series:
         fallback = empty_series()

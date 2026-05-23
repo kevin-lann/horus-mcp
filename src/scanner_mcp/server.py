@@ -401,11 +401,40 @@ def chart_fundamental_overlay(
 
 
 @mcp.tool()
+def chart_fundamental_momentum(
+    symbol: str = "AAPL",
+    frequency: Literal["quarterly", "annual"] = "quarterly",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "5y",
+    interval: Annotated[str, Field(description="yfinance price bar size, usually 1d for this chart.")] = "1d",
+    profitability_metric: Literal["net_margin", "earnings_growth"] = "net_margin",
+    price_style: Literal["candlestick", "line"] = "line",
+) -> Image | str:
+    """Multi-panel price + fundamentals chart: revenue growth, profitability, and valuation.
+
+    Panel 1: price. Panel 2: YoY revenue growth. Panel 3: net margin or earnings growth.
+    Panel 4: historical P/E series.
+    """
+    return chart_tool_result(
+        get_provider(),
+        "fundamental_momentum",
+        {
+            "symbol": symbol,
+            "frequency": frequency,
+            "period": period,
+            "interval": interval,
+            "profitability_metric": profitability_metric,
+            "price_style": price_style,
+        },
+    )
+
+
+@mcp.tool()
 def chart_forward_returns(
     symbol: str = "SPY",
     event_type: Literal["golden_cross", "macd_bullish_crossover", "pct_from_ma", "rsi_oversold", "rsi_overbought"] = "rsi_oversold",
     windows: list[int] | None = None,
     event_params: Annotated[dict[str, Any] | None, Field(description='Optional event detector parameters. For pct_from_ma, use {"ma_type":"ema","ma_period":200,"pct":3}.')] = None,
+    signal_dates: Annotated[list[str] | None, Field(description="Optional explicit signal dates in YYYY-MM-DD format. When provided, these dates are used instead of calculating events from event_type. Non-trading dates map to the next trading session in the 10y daily history window.")] = None,
 ) -> Image | str:
     """Price chart with signal markers plus a forward-return table after historical signal events.
 
@@ -416,13 +445,63 @@ def chart_forward_returns(
     macd_bullish_crossover, pct_from_ma.
     `event_params`: optional event-specific detector parameters. For `pct_from_ma`,
     supported keys are `ma_type` ("sma" or "ema"), `ma_period`, and `pct`.
+    `signal_dates`: optional explicit event dates. When present, `event_type` and
+    `event_params` are ignored for event detection and the study uses those dates.
     """
     params: dict[str, Any] = {"symbol": symbol, "event_type": event_type}
     if windows is not None:
         params["windows"] = windows
     if event_params is not None:
         params["event_params"] = event_params
+    if signal_dates is not None:
+        params["signal_dates"] = signal_dates
     return chart_tool_result(get_provider(), "forward_returns", params)
+
+
+@mcp.tool()
+def chart_basket_breadth(
+    symbols: list[str] | None = None,
+    benchmark: str = "QQQ",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+    sma_period: int = 50,
+    corr_window: int = 63,
+) -> Image | str:
+    """Equal-weight basket vs benchmark with rolling correlation and breadth panels.
+
+    Panel 1: basket vs benchmark normalized to 100. Panel 2: rolling correlation.
+    Panel 3: count of basket members above their SMA.
+    """
+    params: dict[str, Any] = {
+        "benchmark": benchmark,
+        "period": period,
+        "sma_period": sma_period,
+        "corr_window": corr_window,
+    }
+    if symbols is not None:
+        params["symbols"] = symbols
+    return chart_tool_result(get_provider(), "basket_breadth", params)
+
+
+@mcp.tool()
+def chart_pairs_spread(
+    symbol: str = "KO",
+    benchmark: str = "PEP",
+    period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+    spread_mode: Literal["ratio", "price_spread"] = "ratio",
+    z_window: int = 63,
+) -> Image | str:
+    """Pairs chart with normalized prices, spread/ratio, and z-score bands."""
+    return chart_tool_result(
+        get_provider(),
+        "pairs_spread",
+        {
+            "symbol": symbol,
+            "benchmark": benchmark,
+            "period": period,
+            "spread_mode": spread_mode,
+            "z_window": z_window,
+        },
+    )
 
 
 @mcp.tool()

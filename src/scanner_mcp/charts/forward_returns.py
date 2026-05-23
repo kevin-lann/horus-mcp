@@ -11,7 +11,12 @@ from plotly.subplots import make_subplots
 
 from scanner_mcp.charts.rendering import fig_to_b64
 from scanner_mcp.data.provider import DataProvider
-from scanner_mcp.research.forward_returns import DEFAULT_FORWARD_WINDOWS, compute_event_forward_study, summarize_forward_study
+from scanner_mcp.research.forward_returns import (
+    DEFAULT_FORWARD_WINDOWS,
+    compute_custom_date_forward_study,
+    compute_event_forward_study,
+    summarize_forward_study,
+)
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 
 
@@ -98,15 +103,25 @@ def forward_returns_chart(provider: DataProvider, params: dict[str, Any]) -> dic
     """Build a price/event chart plus forward-return summary table."""
     symbol = str(params.get("symbol", "SPY"))
     event_type = str(params.get("event_type", "rsi_oversold"))
+    signal_dates = params.get("signal_dates")
     windows = [int(value) for value in (params.get("windows") or DEFAULT_FORWARD_WINDOWS)]
     event_params = params.get("event_params")
     if event_params is not None and not isinstance(event_params, dict):
         raise ValueError("event_params must be an object")
-    event_title = forward_event_title(event_type, event_params)
-    study = compute_event_forward_study(provider, symbol, event_type, windows, period="10y", params=event_params)
+    if signal_dates is not None and not isinstance(signal_dates, list):
+        raise ValueError("signal_dates must be a list of date strings")
+    if signal_dates is not None and not signal_dates:
+        raise ValueError("signal_dates must contain at least one date")
+    use_custom_dates = signal_dates is not None
+    event_title = "custom signal dates" if use_custom_dates else forward_event_title(event_type, event_params)
+    study = (
+        compute_custom_date_forward_study(provider, symbol, signal_dates, windows, period="10y")
+        if use_custom_dates
+        else compute_event_forward_study(provider, symbol, event_type, windows, period="10y", params=event_params)
+    )
     summary = summarize_forward_study(study)
     if study.price.empty or not study.events or not any(summary.get(window, {}).get("n") for window in study.windows):
-        raise ValueError("No events or no forward returns; try a different symbol/event_type")
+        raise ValueError("No events or no forward returns; try different signal dates or event_type")
 
     marker_window = forward_marker_window(study)
     marker_dates: dict[str, list[Any]] = {"positive": [], "negative": [], "neutral": []}

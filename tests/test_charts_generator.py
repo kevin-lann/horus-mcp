@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 
 from scanner_mcp.charts import generator
 from scanner_mcp.charts.comparison import (
+    basket_breadth_chart,
+    pairs_spread_chart,
     price_overlay,
     drawdown_comparison,
     log_cycle,
@@ -23,7 +25,7 @@ from scanner_mcp.charts.forward_returns import (
     mix_rgb,
     window_label,
 )
-from scanner_mcp.charts.fundamentals import fundamental_overlay
+from scanner_mcp.charts.fundamentals import fundamental_momentum, fundamental_overlay
 from scanner_mcp.charts.params import as_bool, positive_int
 from scanner_mcp.charts.price_history import (
     add_price_history_main_traces,
@@ -220,6 +222,138 @@ class ChartGeneratorTest(unittest.TestCase):
             result = fundamental_overlay(provider, {"symbol": "XYZ", "metric": "revenue", "period": "1y"})
 
         self.assertEqual(result["data"], "pngdata")
+
+    def test_fundamental_momentum_handles_timezone_aware_price_index(self) -> None:
+        price = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0, 13.0],
+                "High": [11.0, 12.0, 13.0, 14.0],
+                "Low": [9.0, 10.0, 11.0, 12.0],
+                "Close": [10.5, 11.5, 12.5, 13.5],
+            },
+            index=pd.date_range("2024-01-01", periods=4, freq="90D", tz="America/New_York"),
+        )
+        revenue = pd.Series(
+            [100.0, 110.0, 121.0, 133.1, 146.41],
+            index=pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31"]),
+            dtype=float,
+        )
+        earnings = pd.Series(
+            [10.0, 12.0, 14.0, 16.0, 18.0],
+            index=revenue.index,
+            dtype=float,
+        )
+        pe = pd.Series([20.0, 21.0, 22.0, 23.0], index=price.index, dtype=float)
+
+        def fake_render(fig, chart_type: str) -> str:
+            self.assertEqual(chart_type, "fundamental_momentum")
+            self.assertEqual(fig.layout.yaxis.title.text, "Price")
+            self.assertEqual(fig.layout.yaxis2.title.text, "Revenue YoY %")
+            self.assertEqual(fig.layout.yaxis4.title.text, "P/E")
+            return "pngdata"
+
+        provider = FakeProvider({"AAPL": price})
+        provider.fundamentals = revenue
+        provider.pe = pe
+        with (
+            patch.object(provider, "get_fundamental_series", side_effect=[revenue, earnings]),
+            patch("scanner_mcp.charts.fundamentals.fig_to_b64", side_effect=fake_render),
+        ):
+            result = fundamental_momentum(provider, {"symbol": "AAPL", "period": "5y"})
+
+        self.assertEqual(result["data"], "pngdata")
+
+    def test_fundamental_momentum_prefers_matched_bundle_over_independent_series(self) -> None:
+        price = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0],
+                "High": [11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0],
+                "Low": [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+                "Close": [10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5],
+            },
+            index=pd.date_range("2022-06-30", periods=9, freq="90D"),
+        )
+        short_revenue = pd.Series(
+            [100.0, 110.0, 120.0, 130.0, 140.0],
+            index=pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31"]),
+            dtype=float,
+        )
+        full_revenue = pd.Series(
+            [80.0, 85.0, 90.0, 95.0, 100.0, 110.0, 120.0, 130.0, 140.0],
+            index=pd.date_range("2022-03-31", periods=9, freq="QE"),
+            dtype=float,
+        )
+        full_earnings = pd.Series(
+            [8.0, 8.5, 9.0, 9.5, 10.0, 11.0, 12.0, 13.0, 14.0],
+            index=full_revenue.index,
+            dtype=float,
+        )
+        pe = pd.Series(np.linspace(20.0, 28.0, len(price.index)), index=price.index, dtype=float)
+
+        class BundleProvider(FakeProvider):
+            def get_fundamental_bundle(self, _symbol: str, _metrics: list[str], _frequency: str) -> dict[str, pd.Series]:
+                return {"revenue": full_revenue, "earnings": full_earnings}
+
+            def get_fundamental_series(self, _symbol: str, metric: str, _frequency: str) -> pd.Series:
+                return short_revenue if metric == "revenue" else pd.Series(dtype=float)
+
+        provider = BundleProvider({"AAPL": price})
+        provider.pe = pe
+
+        def fake_render(fig, chart_type: str) -> str:
+            self.assertEqual(chart_type, "fundamental_momentum")
+            revenue_bar = fig.data[1]
+            margin_bar = fig.data[2]
+            self.assertGreaterEqual(len(revenue_bar.x), 4)
+            self.assertGreaterEqual(len(margin_bar.x), 4)
+            return "pngdata"
+
+        with patch("scanner_mcp.charts.fundamentals.fig_to_b64", side_effect=fake_render):
+            result = fundamental_momentum(provider, {"symbol": "AAPL", "period": "5y"})
+
+        self.assertEqual(result["data"], "pngdata")
+
+    def test_basket_breadth_and_pairs_spread_render(self) -> None:
+        index = pd.date_range("2024-01-01", periods=120, freq="D")
+        provider = FakeProvider(
+            {
+                "AAPL": pd.DataFrame({"Close": np.linspace(100.0, 140.0, len(index))}, index=index),
+                "MSFT": pd.DataFrame({"Close": np.linspace(120.0, 170.0, len(index))}, index=index),
+                "NVDA": pd.DataFrame({"Close": np.linspace(80.0, 190.0, len(index))}, index=index),
+                "QQQ": pd.DataFrame({"Close": np.linspace(300.0, 390.0, len(index))}, index=index),
+                "KO": pd.DataFrame({"Close": np.linspace(50.0, 60.0, len(index))}, index=index),
+                "PEP": pd.DataFrame({"Close": np.linspace(48.0, 58.0, len(index))}, index=index),
+            }
+        )
+
+        def fake_render(fig: go.Figure, chart_type: str) -> str:
+            if chart_type == "basket_breadth":
+                self.assertEqual(fig.layout.yaxis.title.text, "Normalized (base=100)")
+                self.assertEqual(fig.layout.yaxis2.title.text, "Correlation")
+                self.assertEqual(fig.layout.yaxis3.title.text, "Breadth Count")
+            elif chart_type == "pairs_spread":
+                self.assertEqual(fig.layout.yaxis.title.text, "Normalized (base=100)")
+                self.assertEqual(fig.layout.yaxis3.title.text, "Z-score")
+                self.assertEqual(len(fig.layout.shapes), 3)
+            else:
+                self.fail(f"unexpected chart type {chart_type}")
+            return "pngdata"
+
+        with patch("scanner_mcp.charts.comparison.fig_to_b64", side_effect=fake_render):
+            self.assertEqual(
+                basket_breadth_chart(
+                    provider,
+                    {"symbols": ["AAPL", "MSFT", "NVDA"], "benchmark": "QQQ", "period": "1y", "sma_period": 20, "corr_window": 21},
+                )["data"],
+                "pngdata",
+            )
+            self.assertEqual(
+                pairs_spread_chart(
+                    provider,
+                    {"symbol": "KO", "benchmark": "PEP", "period": "1y", "spread_mode": "ratio", "z_window": 20},
+                )["data"],
+                "pngdata",
+            )
 
     def test_price_history_adds_requested_overlays(self) -> None:
         df = pd.DataFrame(
