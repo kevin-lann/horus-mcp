@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import unittest
 from unittest.mock import patch
@@ -26,9 +27,10 @@ class FakeProvider:
 
 class ServerHelpersTest(unittest.TestCase):
     def test_parse_ind_and_float_helpers(self) -> None:
-        self.assertEqual(market_service.parse_indicator("rsi:10"), ("rsi", {"period": 10}))
-        self.assertEqual(market_service.parse_indicator("ema:21"), ("ema", {"period": 21}))
-        self.assertEqual(market_service.parse_indicator("macd"), ("macd", {}))
+        self.assertEqual(market_service.parse_indicator("rsi:10"), ("rsi", {"period": 10}, None))
+        self.assertEqual(market_service.parse_indicator("ema:21"), ("ema", {"period": 21}, None))
+        self.assertEqual(market_service.parse_indicator("macd"), ("macd", {}, None))
+        self.assertEqual(market_service.parse_indicator("rsi:bad"), ("rsi", {}, "invalid indicator period for rsi:bad"))
         self.assertEqual(market_service.as_float("12.5"), 12.5)
         self.assertIsNone(market_service.as_float(float("nan")))
         self.assertIsNone(market_service.as_float("bad"))
@@ -62,6 +64,16 @@ class ServerHelpersTest(unittest.TestCase):
         self.assertEqual(out["unknown"]["error"], "unknown indicator: unknown")
         self.assertIn(out["consensus"], {"buy", "hold", "sell"})
 
+    def test_compute_indicators_reports_invalid_period_per_indicator(self) -> None:
+        df = pd.DataFrame({"High": [1.0] * 20, "Close": [1.0] * 20})
+        provider = FakeProvider(history=df)
+
+        out = market_service.compute_indicators(provider, "spy", ["rsi:0", "ema:bad"], "6mo")
+
+        self.assertEqual(out["rsi:0"]["error"], "invalid indicator period for rsi:0")
+        self.assertEqual(out["ema:bad"]["error"], "invalid indicator period for ema:bad")
+        self.assertEqual(out["consensus"], "hold")
+
     def test_chart_tool_result_returns_json_error_for_bad_chart_response(self) -> None:
         with (
             patch("scanner_mcp.charts.service.generate_chart", return_value={"mime": "image/png"}),
@@ -75,6 +87,22 @@ class ServerHelpersTest(unittest.TestCase):
             patch("scanner_mcp.charts.service.generate_chart", side_effect=RuntimeError("boom")),
         ):
             self.assertEqual(json.loads(chart_service.chart_tool_result(object(), "x", {}))["error"], "boom")
+
+    def test_chart_tool_result_rejects_invalid_or_empty_base64(self) -> None:
+        with patch("scanner_mcp.charts.service.generate_chart", return_value={"mime": "image/png", "data": "%%%"}):
+            self.assertEqual(
+                json.loads(chart_service.chart_tool_result(object(), "x", {}))["error"],
+                "chart response missing image data",
+            )
+
+        with patch(
+            "scanner_mcp.charts.service.generate_chart",
+            return_value={"mime": "image/png", "data": base64.b64encode(b"").decode("ascii")},
+        ):
+            self.assertEqual(
+                json.loads(chart_service.chart_tool_result(object(), "x", {}))["error"],
+                "chart response missing image data",
+            )
 
     def test_chart_fundamental_overlay_passes_params(self) -> None:
         with patch("scanner_mcp.server.chart_tool_result", return_value="ok") as chart_tool:
@@ -123,7 +151,48 @@ class ServerHelpersTest(unittest.TestCase):
         self.assertEqual(ok["id"], 42)
         self.assertEqual(fake_store.args, ("Name", "rsi_oversold", {"threshold": 35}, ["SPY"], "tickers", None))
         self.assertIn("omit ticker_overrides", bad["error"])
-        self.assertIn("invalid exchange", ex_bad["error"])
+        self.assertEqual(ex_bad["error"], "invalid exchange: BAD; use NYSE, NASDAQ, AMEX, or CRYPTO")
+
+    def test_get_ath_distance_handles_none_history(self) -> None:
+        provider = FakeProvider(history=None)
+
+        with patch("scanner_mcp.server.get_provider", return_value=provider):
+            result = json.loads(server.get_ath_distance("spy"))
+
+        self.assertEqual(result, {"error": "no data"})
+
+    def test_run_scan_payload_records_persisted_history_fetch_errors(self) -> None:
+        class FakeStore:
+            def watchlist_get(self):  # noqa: ANN001
+                return []
+
+            def signal_list(self):  # noqa: ANN001
+                return [
+                    type(
+                        "SignalRow",
+                        (),
+                        {
+                            "id": 7,
+                            "name": "RSI Oversold",
+                            "signal_type": "rsi_oversold",
+                            "params": {},
+                            "ticker_overrides": ["SPY"],
+                            "ticker_scope": "tickers",
+                            "exchange": None,
+                            "enabled": True,
+                        },
+                    )()
+                ]
+
+        class ExplodingProvider:
+            def get_history(self, _ticker: str, *, period: str, interval: str):  # noqa: ANN001
+                raise RuntimeError("fetch failed")
+
+        payload = json.loads(signals_service.run_scan_payload(FakeStore(), ExplodingProvider()))
+
+        self.assertEqual(payload["results"], [])
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["errors"], [{"symbol": "SPY", "signal_id": 7, "error": "fetch failed"}])
 
 
 if __name__ == "__main__":

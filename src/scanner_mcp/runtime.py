@@ -90,7 +90,7 @@ def install_signal_handlers() -> tuple[Any, Any]:
         log.info("Received signal %s, shutting down", signum)
         shutdown_scheduler()
         logging.shutdown()
-        os._exit(128 + signum)
+        raise SystemExit(128 + signum)
 
     old_sigint = signal.signal(signal.SIGINT, _handle_stop)
     old_sigterm = signal.signal(signal.SIGTERM, _handle_stop)

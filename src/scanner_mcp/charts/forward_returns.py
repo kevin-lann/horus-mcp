@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -119,8 +120,13 @@ def forward_returns_chart(provider: DataProvider, params: dict[str, Any]) -> dic
         key = "neutral"
         ret_label = "n/a"
         if result is not None:
-            key = "positive" if result.final_return > 0 else "negative"
-            ret_label = f"{result.final_return:.1f}%"
+            final_return = result.final_return
+            if math.isfinite(final_return):
+                ret_label = f"{final_return:.1f}%"
+                if final_return > 0:
+                    key = "positive"
+                elif final_return < 0:
+                    key = "negative"
         marker_dates[key].append(event.date)
         marker_prices[key].append(event.price)
         marker_text[key].append(f"{event.label}<br>{marker_window}d return: {ret_label}")

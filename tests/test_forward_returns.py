@@ -268,6 +268,54 @@ class ForwardReturnsTest(unittest.TestCase):
         self.assertIn("Signal Positive After 1d", marker_names)
         self.assertEqual(marker_text, ["RSI Oversold<br>1d return: 4.0%"])
 
+    def test_forward_returns_chart_treats_zero_and_nonfinite_returns_as_neutral(self) -> None:
+        price = pd.Series([100.0, 101.0, 102.0], index=pd.date_range("2024-01-01", periods=3))
+        study = ForwardStudy(
+            symbol="XYZ",
+            event_type="rsi_oversold",
+            windows=[1],
+            price=price,
+            events=[
+                ForwardEvent(
+                    index=0,
+                    date=price.index[0],
+                    price=100.0,
+                    label="Zero",
+                    event_type="rsi_oversold",
+                    windows={1: ForwardWindowResult(final_return=0.0, max_loss=0.0, max_gain=0.0)},
+                ),
+                ForwardEvent(
+                    index=1,
+                    date=price.index[1],
+                    price=101.0,
+                    label="NaN",
+                    event_type="rsi_oversold",
+                    windows={1: ForwardWindowResult(final_return=float("nan"), max_loss=0.0, max_gain=0.0)},
+                ),
+            ],
+        )
+        marker_names: list[str | None] = []
+        marker_text: list[str] = []
+
+        def fake_fig_to_b64(fig, _chart_type: str) -> str:
+            marker_names.extend(trace.name for trace in fig.data if getattr(trace, "mode", None) == "markers")
+            for trace in fig.data:
+                if getattr(trace, "mode", None) == "markers":
+                    marker_text.extend(trace.text)
+            return "pngdata"
+
+        with (
+            patch("scanner_mcp.charts.forward_returns.compute_event_forward_study", return_value=study),
+            patch("scanner_mcp.charts.forward_returns.fig_to_b64", side_effect=fake_fig_to_b64),
+        ):
+            forward_returns_chart(
+                provider=object(),
+                params={"symbol": "XYZ", "event_type": "rsi_oversold", "windows": [1]},
+            )
+
+        self.assertEqual(marker_names, ["Signal After 1d"])
+        self.assertEqual(marker_text, ["Zero<br>1d return: 0.0%", "NaN<br>1d return: n/a"])
+
     def test_summary_aggregates_by_window(self) -> None:
         df = pd.DataFrame(
             {"Close": [100.0, 110.0, 90.0, 99.0]},

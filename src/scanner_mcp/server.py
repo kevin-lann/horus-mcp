@@ -129,7 +129,7 @@ def get_ath_distance(symbol: str) -> str:
     `symbol`: yfinance ticker.
     """
     df = get_provider().get_history(symbol, period="max", interval="1d")
-    if df.empty:
+    if df is None or getattr(df, "empty", True):
         return json.dumps({"error": "no data"})
     distance = Indicators(df).ath_distance()
     return json.dumps({"symbol": symbol.upper(), "pct_from_ath": distance})

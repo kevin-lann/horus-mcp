@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from typing import Any
 
@@ -21,6 +22,12 @@ def chart_tool_result(provider: DataProvider, chart_type: str, params: dict[str,
         b64 = result.get("data")
         if not isinstance(b64, str):
             return json.dumps({"error": "chart response missing image data"})
-        return Image(data=base64.b64decode(b64))
+        try:
+            decoded = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            return json.dumps({"error": "chart response missing image data"})
+        if not decoded:
+            return json.dumps({"error": "chart response missing image data"})
+        return Image(data=decoded)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": str(exc)})

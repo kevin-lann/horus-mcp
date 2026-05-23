@@ -74,7 +74,7 @@ def validate_signal_creation(
         if not exchange_value:
             return {"error": "ticker_scope=exchange requires exchange (NYSE, NASDAQ, AMEX, or CRYPTO)"}
         if exchange_value not in EXCHANGES:
-            return {"error": f"invalid exchange: {exchange}; use NYSE, NASDAQ, AMEX, or CRYPTO"}
+            return {"error": f"invalid exchange: {exchange_value}; use NYSE, NASDAQ, AMEX, or CRYPTO"}
 
     return {
         "name": name,
@@ -206,6 +206,7 @@ def run_scan_payload(
         )
 
     results: list[dict[str, Any]] = []
+    ticker_errors: list[dict[str, Any]] = []
     watch_symbols = [row.symbol for row in store.watchlist_get()]
     signal_rows = store.signal_list()
     if signal_id is not None:
@@ -226,7 +227,8 @@ def run_scan_payload(
         for ticker in universe:
             try:
                 df = provider.get_history(ticker, period="1y", interval="1d")
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                ticker_errors.append({"symbol": ticker, "signal_id": signal_row.id, "error": str(exc)})
                 continue
             if df is None or df.empty:
                 continue
@@ -245,4 +247,4 @@ def run_scan_payload(
                         "details": details,
                     }
                 )
-    return json.dumps({"results": results, "count": len(results)}, indent=2, default=str)
+    return json.dumps({"results": results, "count": len(results), "errors": ticker_errors}, indent=2, default=str)

@@ -31,6 +31,8 @@ def aligned_close_frame(
     interval: str = "1d",
 ) -> pd.DataFrame:
     """Return close series aligned on a shared date index."""
+    if not symbols:
+        raise ValueError("symbols must not be empty")
     frames = [close_series(provider, symbol, period, interval) for symbol in symbols]
     aligned = pd.concat(frames, axis=1, join="inner").dropna(how="any")
     if aligned.empty:

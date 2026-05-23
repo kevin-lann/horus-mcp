@@ -131,6 +131,15 @@ class ChartGeneratorTest(unittest.TestCase):
 
         self.assertEqual(render.call_count, 3)
 
+    def test_price_overlay_and_drawdown_reject_empty_symbol_data(self) -> None:
+        provider = FakeProvider({})
+
+        with self.assertRaisesRegex(ValueError, "no data available for requested symbols"):
+            price_overlay(provider, {"symbols": "SPY,QQQ", "period": "1mo"})
+
+        with self.assertRaisesRegex(ValueError, "no data available for requested symbols"):
+            drawdown_comparison(provider, {"symbols": "SPY", "period": "1mo"})
+
     def test_ratio_and_relative_strength_and_sector_rotation_render(self) -> None:
         index = pd.date_range("2024-01-01", periods=90, freq="D")
         spy = pd.DataFrame({"Close": np.linspace(100.0, 130.0, len(index))}, index=index)

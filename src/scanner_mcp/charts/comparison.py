@@ -17,17 +17,23 @@ from scanner_mcp.indicators import ta
 
 def price_overlay(provider: DataProvider, params: dict[str, object]) -> dict[str, str]:
     """Plot multiple symbols on one line chart, optionally normalized to 100."""
-    symbols: list = params.get("symbols") or ["SPY", "QQQ"]
+    raw_symbols = params.get("symbols") or ["SPY", "QQQ"]
+    if isinstance(raw_symbols, str):
+        symbols = [symbol.strip().upper() for symbol in raw_symbols.split(",") if symbol.strip()]
+    else:
+        symbols = [str(symbol).strip().upper() for symbol in raw_symbols if str(symbol).strip()]
     period = params.get("period", "1y")
     normalize = params.get("normalize", True)
     fig = go.Figure()
     for symbol in symbols:
-        df = provider.get_history(str(symbol), period=str(period), interval="1d")
-        if df.empty:
+        df = provider.get_history(symbol, period=str(period), interval="1d")
+        if df is None or df.empty:
             continue
         close = df["Close"].astype(float)
         y = close / float(close.iloc[0]) * 100.0 if normalize else close
-        fig.add_trace(go.Scatter(x=df.index, y=y, name=str(symbol), mode="lines"))
+        fig.add_trace(go.Scatter(x=df.index, y=y, name=symbol, mode="lines"))
+    if not fig.data:
+        raise ValueError("no data available for requested symbols")
     fig.update_layout(title="Price overlay" + (" (normalized % base=100)" if normalize else ""), xaxis_title="Date", yaxis_title="Y")
     return {"mime": "image/png", "data": fig_to_b64(fig, "price_overlay")}
 
@@ -121,17 +127,23 @@ def sector_rotation_chart(provider: DataProvider, params: dict[str, object]) -> 
 
 def drawdown_comparison(provider: DataProvider, params: dict[str, object]) -> dict[str, str]:
     """Compare percentage drawdowns from each symbol's running high."""
-    symbols: list = params.get("symbols") or ["^GSPC", "QQQ"]
+    raw_symbols = params.get("symbols") or ["^GSPC", "QQQ"]
+    if isinstance(raw_symbols, str):
+        symbols = [symbol.strip().upper() for symbol in raw_symbols.split(",") if symbol.strip()]
+    else:
+        symbols = [str(symbol).strip().upper() for symbol in raw_symbols if str(symbol).strip()]
     period = params.get("period", "5y")
     fig = go.Figure()
     for symbol in symbols:
-        df = provider.get_history(str(symbol), period=str(period), interval="1d")
-        if df.empty:
+        df = provider.get_history(symbol, period=str(period), interval="1d")
+        if df is None or df.empty:
             continue
         close = df["Close"].astype(float)
         run_max = close.cummax()
         drawdown = (close - run_max) / run_max * 100.0
-        fig.add_trace(go.Scatter(x=df.index, y=drawdown, name=str(symbol), mode="lines"))
+        fig.add_trace(go.Scatter(x=df.index, y=drawdown, name=symbol, mode="lines"))
+    if not fig.data:
+        raise ValueError("no data available for requested symbols")
     fig.update_layout(title="Drawdown % (from running max)", yaxis_title="Drawdown %")
     return {"mime": "image/png", "data": fig_to_b64(fig, "drawdown_comparison")}
 

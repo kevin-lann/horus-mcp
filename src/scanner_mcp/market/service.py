@@ -19,17 +19,33 @@ MARKET_SNAPSHOT: dict[str, list[str]] = {
 }
 
 
-def parse_indicator(name: str) -> tuple[str, dict[str, Any]]:
+def _parse_positive_period(raw_value: str) -> int:
+    """Parse a positive integer period from an indicator suffix."""
+    period = int(raw_value)
+    if period <= 0:
+        raise ValueError("period must be a positive integer")
+    return period
+
+
+def parse_indicator(name: str) -> tuple[str, dict[str, Any], str | None]:
     """Parse indicator specs like `rsi:14` into a key and parameter dict."""
     cleaned = name.strip().lower()
     if ":" in cleaned:
         key, rest = cleaned.split(":", 1)
         key = key.strip()
         if key == "rsi":
-            return "rsi", {"period": int(rest)}
+            try:
+                period = _parse_positive_period(rest)
+            except ValueError:
+                return "rsi", {}, f"invalid indicator period for {cleaned}"
+            return "rsi", {"period": period}, None
         if key in {"sma", "ema"}:
-            return key, {"period": int(rest)}
-    return cleaned, {}
+            try:
+                period = _parse_positive_period(rest)
+            except ValueError:
+                return key, {}, f"invalid indicator period for {cleaned}"
+            return key, {"period": period}, None
+    return cleaned, {}, None
 
 
 def as_float(value: Any) -> float | None:
@@ -122,8 +138,11 @@ def compute_indicators(
     ratings_list: list[ratings.Rating] = []
 
     for raw in names:
-        key, extra = parse_indicator(raw)
+        key, extra, parse_error = parse_indicator(raw)
         key = key.strip()
+        if parse_error is not None:
+            out[raw] = {"error": parse_error}
+            continue
 
         if key == "rsi":
             period_value = int(extra.get("period", 14))
@@ -164,7 +183,16 @@ def compute_indicators(
             beta_history = provider.get_history(symbol, period="1y", interval="1d")
             benchmark_history = provider.get_history("SPY", period="1y", interval="1d")
             beta_value = None
-            if not beta_history.empty and not benchmark_history.empty:
+            if (
+                beta_history is not None
+                and benchmark_history is not None
+                and hasattr(beta_history, "columns")
+                and hasattr(benchmark_history, "columns")
+                and not beta_history.empty
+                and not benchmark_history.empty
+                and "Close" in beta_history.columns
+                and "Close" in benchmark_history.columns
+            ):
                 r1 = beta_history["Close"].pct_change()
                 r2 = benchmark_history["Close"].pct_change()
                 beta_value = beta_from_returns(r1, r2)
