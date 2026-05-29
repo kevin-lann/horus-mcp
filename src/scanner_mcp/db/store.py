@@ -41,6 +41,24 @@ class AlertRow:
     details: dict[str, Any]
 
 
+@dataclass
+class ScanJobRow:
+    id: int
+    job_type: str
+    status: str
+    params: dict[str, Any]
+    requested_at: str
+    started_at: str | None
+    finished_at: str | None
+    checked_count: int
+    total_count: int | None
+    fired_count: int
+    result_count: int
+    cancel_requested: bool
+    result: dict[str, Any] | None
+    error: str | None
+
+
 def _default_db_path() -> Path:
     """Return the default SQLite DB path and ensure its parent exists."""
     p = Path.home() / ".scanner_mcp" / "data.db"
@@ -98,6 +116,23 @@ class Store:
                     FOREIGN KEY (signal_id) REFERENCES signals (id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts (triggered_at DESC);
+                CREATE TABLE IF NOT EXISTS scan_jobs (
+                    id INTEGER PRIMARY KEY,
+                    job_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    params TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    checked_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER,
+                    fired_count INTEGER NOT NULL DEFAULT 0,
+                    result_count INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    result_json TEXT,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_scan_jobs_requested_time ON scan_jobs (requested_at DESC);
                 """
             )
             self._migrate_signals_columns(c)
@@ -241,6 +276,156 @@ class Store:
             )
             return [_row_to_alert(r) for r in rows]
 
+    # scan jobs
+    def scan_job_create(self, job_type: str, params: dict[str, Any]) -> int:
+        """Create a queued scan job and return its ID."""
+        now = _utc_now()
+        with self._conn() as c:
+            c.execute(
+                """
+                INSERT INTO scan_jobs (job_type, status, params, requested_at)
+                VALUES (?, 'queued', ?, ?)
+                """,
+                (job_type, json.dumps(params), now),
+            )
+            return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    def scan_job_get(self, job_id: int) -> ScanJobRow | None:
+        """Return one scan job by ID, or None if missing."""
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+            return _row_to_scan_job(row) if row else None
+
+    def scan_jobs_recent(self, limit: int = 20) -> list[ScanJobRow]:
+        """Return recent scan jobs, newest first."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM scan_jobs ORDER BY requested_at DESC LIMIT ?",
+                (limit,),
+            )
+            return [_row_to_scan_job(r) for r in rows]
+
+    def scan_job_mark_running(self, job_id: int, *, total_count: int | None = None) -> bool:
+        """Transition a queued job to running unless it was already cancelled."""
+        now = _utc_now()
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'running', started_at = ?, total_count = COALESCE(?, total_count)
+                WHERE id = ? AND status = 'queued' AND cancel_requested = 0
+                """,
+                (now, total_count, job_id),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def scan_job_update_progress(
+        self,
+        job_id: int,
+        *,
+        checked_count: int,
+        fired_count: int,
+        result_count: int,
+        total_count: int | None = None,
+    ) -> bool:
+        """Persist running job progress counters."""
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET checked_count = ?, fired_count = ?, result_count = ?, total_count = COALESCE(?, total_count)
+                WHERE id = ? AND status = 'running'
+                """,
+                (checked_count, fired_count, result_count, total_count, job_id),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def scan_job_complete(self, job_id: int, result: dict[str, Any]) -> bool:
+        """Mark a job completed and persist its final result payload."""
+        now = _utc_now()
+        checked_count = int(result.get("checked_count", 0))
+        total_count = result.get("total_count")
+        fired_count = int(result.get("triggered_count", result.get("fired_count", result.get("count", 0))))
+        result_count = int(result.get("count", 0))
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'completed',
+                    finished_at = ?,
+                    checked_count = ?,
+                    total_count = COALESCE(?, total_count),
+                    fired_count = ?,
+                    result_count = ?,
+                    result_json = ?,
+                    error = NULL
+                WHERE id = ?
+                """,
+                (now, checked_count, total_count, fired_count, result_count, json.dumps(result), job_id),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def scan_job_fail(self, job_id: int, error: str) -> bool:
+        """Mark a job failed and store the error string."""
+        now = _utc_now()
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'failed', finished_at = ?, error = ?
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (now, error, job_id),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def scan_job_request_cancel(self, job_id: int) -> bool:
+        """Request cancellation for a queued or running job."""
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET cancel_requested = 1
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (job_id,),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def scan_job_is_cancel_requested(self, job_id: int) -> bool:
+        """Return whether cancellation has been requested for a job."""
+        with self._conn() as c:
+            row = c.execute("SELECT cancel_requested FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+            return bool(row[0]) if row else False
+
+    def scan_job_mark_cancelled(
+        self,
+        job_id: int,
+        *,
+        checked_count: int,
+        fired_count: int,
+        result_count: int,
+        total_count: int | None = None,
+    ) -> bool:
+        """Mark a job cancelled with the latest progress counters."""
+        now = _utc_now()
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    checked_count = ?,
+                    total_count = COALESCE(?, total_count),
+                    fired_count = ?,
+                    result_count = ?,
+                    error = NULL
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (now, checked_count, total_count, fired_count, result_count, job_id),
+            )
+            return (cur.rowcount or 0) > 0
+
 
 def _row_to_signal(r: sqlite3.Row) -> SignalRow:
     """Convert a SQLite signal row into a typed dataclass."""
@@ -273,6 +458,27 @@ def _row_to_alert(r: sqlite3.Row) -> AlertRow:
         symbol=str(r["symbol"]),
         triggered_at=str(r["triggered_at"]),
         details=json.loads(d) if d else {},
+    )
+
+
+def _row_to_scan_job(r: sqlite3.Row) -> ScanJobRow:
+    """Convert a SQLite scan job row into a typed dataclass."""
+    payload = r["result_json"]
+    return ScanJobRow(
+        id=int(r["id"]),
+        job_type=str(r["job_type"]),
+        status=str(r["status"]),
+        params=json.loads(r["params"]),
+        requested_at=str(r["requested_at"]),
+        started_at=str(r["started_at"]) if r["started_at"] else None,
+        finished_at=str(r["finished_at"]) if r["finished_at"] else None,
+        checked_count=int(r["checked_count"]),
+        total_count=int(r["total_count"]) if r["total_count"] is not None else None,
+        fired_count=int(r["fired_count"]),
+        result_count=int(r["result_count"]),
+        cancel_requested=bool(r["cancel_requested"]),
+        result=json.loads(payload) if payload else None,
+        error=str(r["error"]) if r["error"] else None,
     )
 
 

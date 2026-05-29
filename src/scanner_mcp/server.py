@@ -31,7 +31,9 @@ from scanner_mcp.runtime import (
     install_signal_handlers,
     lifespan,
     restore_signal_handlers,
+    start_scan_job,
     shutdown_scheduler,
+    scan_job_payload,
 )
 from scanner_mcp.signals.catalog import list_catalog_entries
 from scanner_mcp.signals.service import create_signal_payload, run_scan_payload
@@ -251,7 +253,11 @@ def run_scan(
     symbol: str | None = None,
     exchange: str | None = None,
 ) -> str:
-    """Run an on-demand scan and return only triggered rows.
+    """Run an on-demand scan synchronously and return only triggered rows.
+
+    Prefer `start_scan` for large universes or many signal types. This tool blocks until the
+    scan completes, so MCP clients may time out on long runs. Use it only when you expect the
+    scan to finish quickly.
 
     Universe — pass **at most one** of:
     - omit `symbol`, `tickers`, and `exchange`: each enabled signal uses its saved scope / overrides / exchange;
@@ -264,6 +270,126 @@ def run_scan(
     signal type against that universe (`signal_id` must be omitted); uses 1 year of daily bars per symbol.
     """
     return run_scan_payload(get_store(), get_provider(), signal_id, tickers, all_signal_types, symbol, exchange)
+
+
+@mcp.tool()
+def start_scan(
+    signal_id: int | None = None,
+    tickers: list[str] | None = None,
+    all_signal_types: bool = False,
+    symbol: str | None = None,
+    exchange: str | None = None,
+) -> str:
+    """Start a background scan job and return immediately with a persistent `job_id`.
+
+    Preferred client flow for long scans:
+    1. Call `start_scan(...)`.
+    2. Read `job_id` from the JSON response.
+    3. Poll `get_scan_status(job_id)` until `status` is `completed`, `failed`, or `cancelled`.
+    4. When `status` is `completed`, call `get_scan_result(job_id)` exactly once or as needed.
+
+    This is the recommended tool for MCP clients such as Claude Desktop because it avoids
+    request timeouts. The server stores progress and final results in SQLite so the client can
+    reconnect later and continue polling with the same `job_id`.
+
+    Universe — pass **at most one** of:
+    - omit `symbol`, `tickers`, and `exchange`: each enabled signal uses its saved scope / overrides / exchange;
+    - `symbol`: single ticker string (e.g. `NVDA`);
+    - `tickers`: list of ticker strings;
+    - `exchange`: `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO`.
+
+    `signal_id`: optional; when set, only that enabled signal runs (ignored when `all_signal_types` is true).
+    `all_signal_types`: when true together with exactly one universe selector above, run every catalog
+    signal type against that universe (`signal_id` must be omitted).
+    """
+    job_id = start_scan_job(
+        signal_id=signal_id,
+        tickers=tickers,
+        all_signal_types=all_signal_types,
+        symbol=symbol,
+        exchange=exchange,
+    )
+    payload = scan_job_payload(job_id)
+    payload["poll_after_seconds"] = 2
+    payload["next_action"] = (
+        "Poll get_scan_status(job_id) until status is completed, failed, or cancelled. "
+        "Then call get_scan_result(job_id) if completed."
+    )
+    return json.dumps(payload, indent=2, default=str)
+
+
+@mcp.tool()
+def get_scan_status(job_id: int) -> str:
+    """Return scan job status and progress counters for a previously started background scan.
+
+    Client behavior:
+    - Keep polling while `status` is `queued` or `running`.
+    - Stop polling when `status` is `completed`, `failed`, or `cancelled`.
+    - If `status` is `completed`, call `get_scan_result(job_id)` to retrieve the stored results.
+
+    Counters:
+    - `checked_count`: symbol/signal evaluations completed so far.
+    - `total_count`: estimated total evaluations, when known.
+    - `fired_count`: number of triggered matches found so far.
+    - `result_count`: number of rows that will appear in `get_scan_result`.
+    """
+    payload = scan_job_payload(job_id)
+    if "error" not in payload and payload["status"] in {"queued", "running"}:
+        payload["poll_after_seconds"] = 2
+        payload["next_action"] = "Poll get_scan_status(job_id) again after a short delay."
+    elif "error" not in payload and payload["status"] == "completed":
+        payload["next_action"] = "Call get_scan_result(job_id) to read the final stored results."
+    return json.dumps(payload, indent=2, default=str)
+
+
+@mcp.tool()
+def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0) -> str:
+    """Return the stored final result for a completed background scan.
+
+    Use this only after `get_scan_status(job_id)` reports `status=completed`. This tool never
+    reruns the scan; it only reads the persisted result from SQLite.
+
+    Pagination:
+    - `offset`: zero-based row offset into the stored `results` array (default 0).
+    - `limit`: optional maximum number of rows to return from the stored `results` array.
+
+    If the job is not completed yet, this tool returns a small status payload instead of partial results.
+    """
+    row = get_store().scan_job_get(job_id)
+    if row is None:
+        return json.dumps({"error": "scan job not found", "job_id": job_id})
+    if row.status != "completed":
+        payload = scan_job_payload(job_id)
+        payload["next_action"] = "Wait for status=completed before requesting results."
+        return json.dumps(payload, indent=2, default=str)
+    result = dict(row.result or {})
+    rows = list(result.get("results", []))
+    start = max(0, offset)
+    stop = None if limit is None else max(start, start + max(0, limit))
+    sliced = rows[start:stop]
+    result["job_id"] = job_id
+    result["status"] = row.status
+    result["offset"] = start
+    result["returned_count"] = len(sliced)
+    result["total_result_count"] = len(rows)
+    result["results"] = sliced
+    if stop is not None and stop < len(rows):
+        result["next_offset"] = stop
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool()
+def cancel_scan(job_id: int) -> str:
+    """Request cancellation for a queued or running background scan job.
+
+    Cancellation is best-effort and cooperative. After calling this tool, poll
+    `get_scan_status(job_id)` until the job reaches `cancelled`, `completed`, or `failed`.
+    """
+    ok = get_store().scan_job_request_cancel(job_id)
+    payload = scan_job_payload(job_id)
+    payload["cancel_request_accepted"] = ok
+    payload["next_action"] = "Poll get_scan_status(job_id) to observe the terminal state."
+    return json.dumps(payload, indent=2, default=str)
 
 
 @mcp.tool()
