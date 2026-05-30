@@ -28,10 +28,10 @@ class SignalRow:
     ticker_overrides: list[str] | None
     ticker_scope: str
     exchange: str | None
-    history_period: str
-    interval: str
     enabled: bool
     created_at: str
+    history_period: str = "1y"
+    interval: str = "1d"
 
 
 @dataclass
@@ -462,10 +462,10 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
         ticker_overrides=ov_list,
         ticker_scope=scope,
         exchange=str(ex).strip().upper() if ex else None,
-        history_period=history_period,
-        interval=interval,
         enabled=bool(r["enabled"]),
         created_at=str(r["created_at"]),
+        history_period=history_period,
+        interval=interval,
     )
 
 

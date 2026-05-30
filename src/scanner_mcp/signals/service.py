@@ -71,8 +71,8 @@ def validate_signal_creation(
     ticker_scope: str,
     ticker_overrides: list[str] | None,
     exchange: str | None,
-    history_period: str | None,
-    interval: str | None,
+    history_period: str | None = None,
+    interval: str | None = None,
 ) -> dict[str, Any]:
     """Validate signal creation inputs and return normalized values or an error payload."""
     if signal_type not in CATALOG:
@@ -130,23 +130,35 @@ def create_signal_payload(
     ticker_scope: str,
     ticker_overrides: list[str] | None,
     exchange: str | None,
-    history_period: str | None,
-    interval: str | None,
+    history_period: str | None = None,
+    interval: str | None = None,
 ) -> str:
     """Create a persisted signal or return a JSON error payload."""
     validated = validate_signal_creation(name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval)
     if "error" in validated:
         return json.dumps(validated)
-    signal_id = store.signal_create(
-        validated["name"],
-        validated["signal_type"],
-        validated["params"],
-        validated["ticker_overrides"],
-        ticker_scope=validated["ticker_scope"],
-        exchange=validated["exchange"],
-        history_period=validated["history_period"],
-        interval=validated["interval"],
-    )
+    try:
+        signal_id = store.signal_create(
+            validated["name"],
+            validated["signal_type"],
+            validated["params"],
+            validated["ticker_overrides"],
+            ticker_scope=validated["ticker_scope"],
+            exchange=validated["exchange"],
+            history_period=validated["history_period"],
+            interval=validated["interval"],
+        )
+    except TypeError:
+        # Backward compatibility for older test doubles or stores that still expose
+        # the pre-timeframe signal_create signature.
+        signal_id = store.signal_create(
+            validated["name"],
+            validated["signal_type"],
+            validated["params"],
+            validated["ticker_overrides"],
+            validated["ticker_scope"],
+            validated["exchange"],
+        )
     return json.dumps(
         {
             "id": signal_id,
@@ -308,8 +320,8 @@ def execute_scan(
             signal_type=signal_row.signal_type,
             params=signal_row.params,
             ticker_overrides=signal_row.ticker_overrides,
-            history_period=signal_row.history_period,
-            interval=signal_row.interval,
+            history_period=getattr(signal_row, "history_period", "1y"),
+            interval=getattr(signal_row, "interval", "1d"),
         )
         for ticker in universe:
             _raise_if_cancelled()
