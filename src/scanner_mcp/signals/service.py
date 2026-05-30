@@ -15,6 +15,8 @@ from scanner_mcp.signals.models import ActiveSignal
 EXCHANGES = frozenset({"NYSE", "NASDAQ", "AMEX", "CRYPTO"})
 ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"})
 ALLOWED_INTERVALS = frozenset({"1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "5d", "1wk", "1mo", "3mo"})
+INTRADAY_INTERVALS = frozenset({"1m", "2m", "5m", "15m", "30m", "60m", "1h"})
+INTRADAY_ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo"})
 
 
 class ScanCancelledError(RuntimeError):
@@ -47,6 +49,15 @@ def normalize_interval(interval: str | None) -> str:
             f"invalid interval: {interval}; use one of {', '.join(sorted(ALLOWED_INTERVALS))}"
         )
     return value
+
+
+def validate_history_request_pair(history_period: str, interval: str) -> None:
+    """Validate supported yfinance period/interval combinations for signal scans."""
+    if interval in INTRADAY_INTERVALS and history_period not in INTRADAY_ALLOWED_HISTORY_PERIODS:
+        raise ValueError(
+            "unsupported history_period/interval combination: "
+            f"{history_period} with {interval}; intraday intervals require history_period of 1d, 5d, or 1mo"
+        )
 
 
 def resolve_signal_universe(signal_row: SignalRow, watchlist: list[str]) -> list[str]:
@@ -85,6 +96,7 @@ def validate_signal_creation(
     try:
         history_period_value = normalize_history_period(history_period)
         interval_value = normalize_interval(interval)
+        validate_history_request_pair(history_period_value, interval_value)
     except ValueError as exc:
         return {"error": str(exc)}
     overrides: list[str] | None = None
@@ -334,6 +346,7 @@ def execute_scan(
                     progress_callback(checked_count, fired_count, len(results), total_count)
                 continue
             if df is None or df.empty:
+                ticker_errors.append({"symbol": ticker, "signal_id": signal_row.id, "error": "no_history"})
                 if progress_callback:
                     progress_callback(checked_count, fired_count, len(results), total_count)
                 continue
