@@ -36,6 +36,9 @@ def confidence_score(signal_type: str, triggered: bool, details: dict[str, Any])
         "sma_fail",
         "ath_zero",
         "prior_zero",
+        "swing_not_found",
+        "missing_ohlcv",
+        "volume_zero",
     }:
         return 0
 
@@ -97,6 +100,69 @@ def confidence_score(signal_type: str, triggered: bool, details: dict[str, Any])
             score = max(score, 70.0)
         else:
             score *= 0.5
+        return clampconfidence_score(score)
+
+    if signal_type == "cup_and_handle":
+        depth = max(float(details["cup_depth_pct"]), 0.0)
+        symmetry = max(0.0, 100.0 - float(details["peak_tolerance_pct"]) * 12.0)
+        handle = max(0.0, 100.0 - float(details["handle_pullback_pct"]) * 12.0)
+        breakout = min(100.0, max(0.0, 70.0 + float(details["breakout_gap_pct"]) * 10.0))
+        score = (min(100.0, depth * 6.0) + symmetry + handle + breakout) / 4.0
+        if triggered:
+            score = max(score, 70.0)
+        else:
+            score *= 0.55
+        return clampconfidence_score(score)
+
+    if signal_type == "golden_pocket":
+        swing = min(100.0, max(0.0, float(details["swing_pct"]) * 4.0))
+        zone_low = float(details["golden_pocket_low"])
+        zone_high = float(details["golden_pocket_high"])
+        close = float(details["close"])
+        midpoint = (zone_low + zone_high) / 2.0
+        half_width = max(abs(zone_high - zone_low) / 2.0, 1e-9)
+        proximity = max(0.0, 100.0 - abs(close - midpoint) / half_width * 100.0)
+        score = (swing + proximity) / 2.0
+        if triggered:
+            score = max(score, 70.0)
+        else:
+            score *= 0.6
+        return clampconfidence_score(score)
+
+    if signal_type in {"head_and_shoulders", "inverse_head_and_shoulders"}:
+        symmetry = max(0.0, 100.0 - float(details["shoulder_tolerance_pct"]) * 12.0)
+        head_margin = min(100.0, max(0.0, float(details["head_margin_pct"]) * 10.0))
+        breakout = min(100.0, max(0.0, abs(float(details["breakout_pct"])) * 30.0))
+        score = (symmetry + head_margin + breakout) / 3.0
+        if triggered:
+            score = max(score, 72.0)
+        else:
+            score *= 0.55
+        return clampconfidence_score(score)
+
+    if signal_type in {"double_bottom", "double_top"}:
+        symmetry = max(0.0, 100.0 - float(details["tolerance_pct"]) * 15.0)
+        reversal = min(
+            100.0,
+            max(0.0, float(details.get("rebound_pct", details.get("pullback_pct", 0.0))) * 8.0),
+        )
+        breakout = min(100.0, max(0.0, abs(float(details["breakout_pct"])) * 40.0))
+        score = (symmetry + reversal + breakout) / 3.0
+        if triggered:
+            score = max(score, 70.0)
+        else:
+            score *= 0.55
+        return clampconfidence_score(score)
+
+    if signal_type == "buyable_gap_up":
+        gap = min(100.0, max(0.0, float(details["gap_pct"]) * 20.0))
+        close_strength = min(100.0, max(0.0, float(details["close_position"]) * 100.0))
+        volume = min(100.0, max(0.0, float(details["volume_ratio"]) * 40.0))
+        score = (gap + close_strength + volume) / 3.0
+        if triggered:
+            score = max(score, 75.0)
+        else:
+            score *= 0.6
         return clampconfidence_score(score)
 
     return 0
