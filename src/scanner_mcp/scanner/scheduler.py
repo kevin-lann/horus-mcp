@@ -73,11 +73,13 @@ def run_full_scan(
             signal_type=srow.signal_type,
             params=srow.params,
             ticker_overrides=srow.ticker_overrides,
+            history_period=srow.history_period,
+            interval=srow.interval,
         )
         for sym in tickers:
             result["checked"] += 1
             try:
-                df = provider.get_history(sym, period="1y", interval="1d")
+                df = provider.get_history(sym, period=asig.history_period, interval=asig.interval)
             except Exception as e:  # noqa: BLE001
                 log.debug("history %s: %s", sym, e)
                 continue

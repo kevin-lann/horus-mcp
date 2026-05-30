@@ -28,6 +28,8 @@ class SignalRow:
     ticker_overrides: list[str] | None
     ticker_scope: str
     exchange: str | None
+    history_period: str
+    interval: str
     enabled: bool
     created_at: str
 
@@ -104,6 +106,8 @@ class Store:
                     ticker_overrides TEXT,
                     ticker_scope TEXT NOT NULL DEFAULT 'watchlist',
                     exchange TEXT,
+                    history_period TEXT NOT NULL DEFAULT '1y',
+                    interval TEXT NOT NULL DEFAULT '1d',
                     enabled INTEGER DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
@@ -138,7 +142,7 @@ class Store:
             self._migrate_signals_columns(c)
 
     def _migrate_signals_columns(self, conn: sqlite3.Connection) -> None:
-        """Add ticker_scope / exchange and backfill from legacy ticker_overrides."""
+        """Add newer signal columns and backfill sane defaults for legacy rows."""
         cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(signals)")}
         if "ticker_scope" not in cols:
             conn.execute(
@@ -158,6 +162,14 @@ class Store:
                         "UPDATE signals SET ticker_scope = 'watchlist' WHERE id = ?",
                         (rid,),
                     )
+        if "history_period" not in cols:
+            conn.execute(
+                "ALTER TABLE signals ADD COLUMN history_period TEXT NOT NULL DEFAULT '1y'",
+            )
+        if "interval" not in cols:
+            conn.execute(
+                "ALTER TABLE signals ADD COLUMN interval TEXT NOT NULL DEFAULT '1d'",
+            )
 
     # watchlist
     def watchlist_add(self, symbols: Sequence[str]) -> list[str]:
@@ -202,6 +214,8 @@ class Store:
         ticker_overrides: list[str] | None,
         ticker_scope: str = "watchlist",
         exchange: str | None = None,
+        history_period: str = "1y",
+        interval: str = "1d",
     ) -> int:
         """Persist an enabled signal and return its database ID."""
         now = _utc_now()
@@ -210,9 +224,9 @@ class Store:
                 """
                 INSERT INTO signals (
                     name, signal_type, params, ticker_overrides,
-                    ticker_scope, exchange, enabled, created_at
+                    ticker_scope, exchange, history_period, interval, enabled, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     name,
@@ -221,6 +235,8 @@ class Store:
                     json.dumps(ticker_overrides) if ticker_overrides is not None else None,
                     ticker_scope,
                     exchange.strip().upper() if exchange else None,
+                    history_period.strip().lower(),
+                    interval.strip().lower(),
                     now,
                 ),
             )
@@ -433,6 +449,8 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
     keys = r.keys()
     scope = str(r["ticker_scope"]) if "ticker_scope" in keys else "watchlist"
     ex = r["exchange"] if "exchange" in keys else None
+    history_period = str(r["history_period"]).strip().lower() if "history_period" in keys and r["history_period"] else "1y"
+    interval = str(r["interval"]).strip().lower() if "interval" in keys and r["interval"] else "1d"
     ov_list = json.loads(ov) if ov else None
     if "ticker_scope" not in keys:
         scope = "tickers" if ov_list else "watchlist"
@@ -444,6 +462,8 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
         ticker_overrides=ov_list,
         ticker_scope=scope,
         exchange=str(ex).strip().upper() if ex else None,
+        history_period=history_period,
+        interval=interval,
         enabled=bool(r["enabled"]),
         created_at=str(r["created_at"]),
     )
