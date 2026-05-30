@@ -19,6 +19,7 @@ class SignalCatalogTest(unittest.TestCase):
         entries = list_catalog_entries()
 
         self.assertTrue(any(x["signal_type"] == "golden_cross" for x in entries))
+        self.assertTrue(all("confidence_basis" in x for x in entries))
         self.assertEqual(merge_params("rsi_oversold", {"threshold": 35})["period"], 14)
         self.assertEqual(merge_params("rsi_oversold", {"threshold": 35})["threshold"], 35)
         with self.assertRaises(ValueError):
@@ -27,7 +28,11 @@ class SignalCatalogTest(unittest.TestCase):
 
 class SignalEvaluatorTest(unittest.TestCase):
     def test_rejects_missing_data_and_unknown_signal(self) -> None:
-        self.assertEqual(evaluate(_signal("rsi_oversold"), pd.DataFrame()), (False, {"error": "no_data"}))
+        ok, details = evaluate(_signal("rsi_oversold"), pd.DataFrame())
+        self.assertFalse(ok)
+        self.assertEqual(details["error"], "no_data")
+        self.assertEqual(details["confidence_score"], 0)
+        self.assertEqual(details["confidence_grade"], "F")
 
         with self.assertRaises(ValueError):
             evaluate(_signal("does_not_exist"), pd.DataFrame({"Close": [1.0, 2.0]}))
@@ -40,6 +45,8 @@ class SignalEvaluatorTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("sma_2", details)
         self.assertIn("sma_3", details)
+        self.assertIsInstance(details["confidence_score"], int)
+        self.assertEqual(details["confidence_grade"], "A")
 
         df2 = pd.DataFrame({"Close": [8.0, 9.0, 10.0, 9.0, 6.0]})
         ok, _ = evaluate(_signal("death_cross", {"fast": 2, "slow": 3}), df2)
@@ -52,10 +59,12 @@ class SignalEvaluatorTest(unittest.TestCase):
             ok, details = evaluate(_signal("rsi_oversold"), df)
         self.assertTrue(ok)
         self.assertEqual(details["threshold"], 30)
+        self.assertGreaterEqual(details["confidence_score"], 70)
 
         with patch("scanner_mcp.signals.evaluator.Indicators.rsi", return_value=75.0):
-            ok, _ = evaluate(_signal("rsi_overbought"), df)
+            ok, details = evaluate(_signal("rsi_overbought"), df)
         self.assertTrue(ok)
+        self.assertEqual(details["confidence_grade"], "B")
 
     def test_macd_crossovers_handle_both_directions(self) -> None:
         df = pd.DataFrame({"Close": [100.0, 99.0, 101.0]})
@@ -71,7 +80,9 @@ class SignalEvaluatorTest(unittest.TestCase):
             ok, details = evaluate(_signal("macd_bullish_crossover"), df)
 
         self.assertTrue(ok)
-        self.assertEqual(details, {"macd": 1.0, "signal": 0.0})
+        self.assertEqual(details["macd"], 1.0)
+        self.assertEqual(details["signal"], 0.0)
+        self.assertEqual(details["confidence_grade"], "A")
 
         bearish = pd.DataFrame(
             {
@@ -94,11 +105,13 @@ class SignalEvaluatorTest(unittest.TestCase):
         ok, details = evaluate(_signal("pct_from_ath", {"min_pct_below_ath": 20.0}), df)
         self.assertTrue(ok)
         self.assertAlmostEqual(details["pct_from_ath"], -25.0)
+        self.assertEqual(details["confidence_grade"], "C")
 
         close = pd.Series([10.0, 10.0, 10.0, 11.0])
         ok, details = evaluate(_signal("pct_from_ma", {"ma_period": 3, "pct": 10.0}), pd.DataFrame({"Close": close}))
         self.assertTrue(ok)
         self.assertLessEqual(details["diff_pct"], 10.0)
+        self.assertIn("threshold_pct", details)
 
         bands = pd.DataFrame({"BBL_3_2.0": [9.0], "BBU_3_2.0": [11.0]})
         with patch("scanner_mcp.signals.evaluator.ta.bbands", return_value=bands):
@@ -108,6 +121,7 @@ class SignalEvaluatorTest(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(details["broke"], "upper")
+        self.assertGreaterEqual(details["confidence_score"], 70)
 
         flag_df = pd.DataFrame({"Close": [100.0, 110.0, 120.0, 121.0, 122.0, 123.0]})
         ok, details = evaluate(
@@ -116,13 +130,16 @@ class SignalEvaluatorTest(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertGreaterEqual(details["prior_move_pct"], 9.0)
+        self.assertIn(details["confidence_grade"], {"C", "B", "A"})
 
     def test_evaluator_returns_exception_details(self) -> None:
         with patch("scanner_mcp.signals.evaluator.calc.moving_average", side_effect=RuntimeError("boom")):
             ok, details = evaluate(_signal("golden_cross", {"fast": 2, "slow": 3}), pd.DataFrame({"Close": [1, 2, 3, 4, 5]}))
 
         self.assertFalse(ok)
-        self.assertEqual(details, {"error": "boom"})
+        self.assertEqual(details["error"], "boom")
+        self.assertEqual(details["confidence_score"], 0)
+        self.assertEqual(details["confidence_grade"], "F")
 
 
 if __name__ == "__main__":

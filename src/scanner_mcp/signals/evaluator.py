@@ -11,6 +11,7 @@ from scanner_mcp.indicators import ta
 from scanner_mcp.indicators.core import Indicators
 from scanner_mcp.signals import calculations as calc
 from scanner_mcp.signals.catalog import merge_params
+from scanner_mcp.signals.confidence import with_confidence, with_confidence_result
 from scanner_mcp.signals.models import ActiveSignal
 
 log = logging.getLogger(__name__)
@@ -28,36 +29,36 @@ def evaluate(signal: ActiveSignal, df: pd.DataFrame) -> tuple[bool, dict[str, An
     p = merge_params(st, signal.params)
     ind = Indicators(df)
     if df is None or df.empty or "Close" not in df.columns:
-        return False, {"error": "no_data"}
+        return False, with_confidence(st, False, {"error": "no_data"})
 
     close = df["Close"].astype(float)
 
     try:
         if st == "golden_cross":
-            return _cross_sma(close, p["fast"], p["slow"], bullish=True)
+            return with_confidence_result(st, *_cross_sma(close, p["fast"], p["slow"], bullish=True))
         if st == "death_cross":
-            return _cross_sma(close, p["fast"], p["slow"], bullish=False)
+            return with_confidence_result(st, *_cross_sma(close, p["fast"], p["slow"], bullish=False))
         if st == "macd_bullish_crossover":
-            return _cross_macd(close, p, bullish=True)
+            return with_confidence_result(st, *_cross_macd(close, p, bullish=True))
         if st == "macd_bearish_crossover":
-            return _cross_macd(close, p, bullish=False)
+            return with_confidence_result(st, *_cross_macd(close, p, bullish=False))
         if st == "rsi_oversold":
-            return _rsi_threshold(ind, p["period"], p["threshold"], below=True)
+            return with_confidence_result(st, *_rsi_threshold(ind, p["period"], p["threshold"], below=True))
         if st == "rsi_overbought":
-            return _rsi_threshold(ind, p["period"], p["threshold"], below=False)
+            return with_confidence_result(st, *_rsi_threshold(ind, p["period"], p["threshold"], below=False))
         if st == "pct_from_ma":
-            return _pct_from_ma(close, p)
+            return with_confidence_result(st, *_pct_from_ma(close, p))
         if st == "pct_from_ath":
-            return _pct_from_ath(df, p["min_pct_below_ath"])
+            return with_confidence_result(st, *_pct_from_ath(df, p["min_pct_below_ath"]))
         if st == "bbands_breakout":
-            return _bb_breakout(close, p)
+            return with_confidence_result(st, *_bb_breakout(close, p))
         if st == "bull_flag":
-            return _bull_flag(df, p)
-    except Exception as e:  # noqa: BLE001
+            return with_confidence_result(st, *_bull_flag(df, p))
+    except Exception as e:
         log.exception("evaluate %s: %s", st, e)
-        return False, {"error": str(e)}
+        return False, with_confidence(st, False, {"error": str(e)})
 
-    return False, {"error": "unknown_signal"}
+    return False, with_confidence(st, False, {"error": "unknown_signal"})
 
 
 def _cross_sma(
@@ -138,8 +139,9 @@ def _pct_from_ma(close: pd.Series, p: dict[str, Any]) -> tuple[bool, dict[str, A
     if ma == 0 or pd.isna(ma):
         return False, {"reason": "ma_nan"}
     diff = float(calc.pct_distance_from_ma(close, line).iloc[-1])
-    trig = diff <= float(p["pct"])
-    return trig, {"price": pr, f"{ma_type}_{n}": ma, "diff_pct": diff}
+    threshold = float(p["pct"])
+    trig = diff <= threshold
+    return trig, {"price": pr, f"{ma_type}_{n}": ma, "diff_pct": diff, "threshold_pct": threshold}
 
 
 def _pct_from_ath(df: pd.DataFrame, min_pct: float) -> tuple[bool, dict[str, Any]]:
@@ -151,7 +153,7 @@ def _pct_from_ath(df: pd.DataFrame, min_pct: float) -> tuple[bool, dict[str, Any
         return False, {"reason": "ath_zero"}
     dist = (pr - ath) / ath * 100.0
     trig = dist <= -min_pct
-    return trig, {"ath": ath, "close": pr, "pct_from_ath": dist}
+    return trig, {"ath": ath, "close": pr, "pct_from_ath": dist, "threshold_pct": float(min_pct)}
 
 
 def _bb_breakout(close: pd.Series, p: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
