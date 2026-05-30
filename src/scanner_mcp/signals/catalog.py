@@ -66,6 +66,55 @@ CATALOG: dict[str, dict[str, Any]] = {
         "required_params": [],
         "confidence_basis": "Combination of prior impulse strength and how tight the consolidation remains.",
     },
+    "cup_and_handle": {
+        "description": "Rounded base with similar left/right highs, a shallow handle, and price near handle breakout",
+        "default_params": {
+            "lookback": 30,
+            "handle_days": 5,
+            "peak_tolerance_pct": 4.0,
+            "min_cup_depth_pct": 8.0,
+            "max_handle_pullback_pct": 6.0,
+            "breakout_buffer_pct": 1.5,
+        },
+        "required_params": [],
+        "confidence_basis": "Balance between cup depth, peak symmetry, shallow handle pullback, and proximity to breakout.",
+    },
+    "golden_pocket": {
+        "description": "Price retraces into the 61.8%-65.0% Fibonacci golden-pocket zone after an upswing",
+        "default_params": {"lookback": 60, "min_swing_pct": 10.0, "retrace_low": 0.618, "retrace_high": 0.65},
+        "required_params": [],
+        "confidence_basis": "Strength of the prior upswing and how precisely price sits inside the golden-pocket retracement zone.",
+    },
+    "head_and_shoulders": {
+        "description": "Bearish head-and-shoulders with similar shoulders, a higher head, and a break below neckline",
+        "default_params": {"lookback": 25, "shoulder_tolerance_pct": 4.0, "min_head_margin_pct": 3.0},
+        "required_params": [],
+        "confidence_basis": "How symmetrical the shoulders are, how distinct the head is, and how decisively price breaks the neckline.",
+    },
+    "inverse_head_and_shoulders": {
+        "description": "Bullish inverse head-and-shoulders with similar shoulders, a lower head, and a break above neckline",
+        "default_params": {"lookback": 25, "shoulder_tolerance_pct": 4.0, "min_head_margin_pct": 3.0},
+        "required_params": [],
+        "confidence_basis": "How symmetrical the shoulders are, how distinct the head is, and how decisively price breaks above the neckline.",
+    },
+    "double_bottom": {
+        "description": "Two similar lows separated by a rally, with price reclaiming the neckline",
+        "default_params": {"lookback": 20, "peak_tolerance_pct": 3.0, "min_rebound_pct": 6.0},
+        "required_params": [],
+        "confidence_basis": "Similarity of the lows, rebound quality between them, and the latest breakout back above neckline.",
+    },
+    "double_top": {
+        "description": "Two similar highs separated by a pullback, with price breaking below the neckline",
+        "default_params": {"lookback": 20, "peak_tolerance_pct": 3.0, "min_pullback_pct": 6.0},
+        "required_params": [],
+        "confidence_basis": "Similarity of the highs, pullback quality between them, and the latest break back below neckline.",
+    },
+    "buyable_gap_up": {
+        "description": "Latest bar gaps above the prior high on strong volume and closes in the upper part of the range",
+        "default_params": {"min_gap_pct": 0.75, "min_close_position": 0.6, "min_volume_ratio": 1.5, "volume_lookback": 20},
+        "required_params": [],
+        "confidence_basis": "Size of the gap, relative volume expansion, and how strongly the session closes within its range.",
+    },
 }
 
 

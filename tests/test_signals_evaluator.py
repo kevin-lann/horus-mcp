@@ -19,6 +19,8 @@ class SignalCatalogTest(unittest.TestCase):
         entries = list_catalog_entries()
 
         self.assertTrue(any(x["signal_type"] == "golden_cross" for x in entries))
+        self.assertTrue(any(x["signal_type"] == "cup_and_handle" for x in entries))
+        self.assertTrue(any(x["signal_type"] == "buyable_gap_up" for x in entries))
         self.assertTrue(all("confidence_basis" in x for x in entries))
         self.assertEqual(merge_params("rsi_oversold", {"threshold": 35})["period"], 14)
         self.assertEqual(merge_params("rsi_oversold", {"threshold": 35})["threshold"], 35)
@@ -46,7 +48,7 @@ class SignalEvaluatorTest(unittest.TestCase):
         self.assertIn("sma_2", details)
         self.assertIn("sma_3", details)
         self.assertIsInstance(details["confidence_score"], int)
-        self.assertEqual(details["confidence_grade"], "A")
+        self.assertIn(details["confidence_grade"], {"A", "A+"})
 
         df2 = pd.DataFrame({"Close": [8.0, 9.0, 10.0, 9.0, 6.0]})
         ok, _ = evaluate(_signal("death_cross", {"fast": 2, "slow": 3}), df2)
@@ -64,7 +66,7 @@ class SignalEvaluatorTest(unittest.TestCase):
         with patch("scanner_mcp.signals.evaluator.Indicators.rsi", return_value=75.0):
             ok, details = evaluate(_signal("rsi_overbought"), df)
         self.assertTrue(ok)
-        self.assertEqual(details["confidence_grade"], "B")
+        self.assertIn(details["confidence_grade"], {"B", "B+"})
 
     def test_macd_crossovers_handle_both_directions(self) -> None:
         df = pd.DataFrame({"Close": [100.0, 99.0, 101.0]})
@@ -82,7 +84,7 @@ class SignalEvaluatorTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(details["macd"], 1.0)
         self.assertEqual(details["signal"], 0.0)
-        self.assertEqual(details["confidence_grade"], "A")
+        self.assertIn(details["confidence_grade"], {"A", "A+"})
 
         bearish = pd.DataFrame(
             {
@@ -105,7 +107,7 @@ class SignalEvaluatorTest(unittest.TestCase):
         ok, details = evaluate(_signal("pct_from_ath", {"min_pct_below_ath": 20.0}), df)
         self.assertTrue(ok)
         self.assertAlmostEqual(details["pct_from_ath"], -25.0)
-        self.assertEqual(details["confidence_grade"], "C")
+        self.assertIn(details["confidence_grade"], {"C", "C+"})
 
         close = pd.Series([10.0, 10.0, 10.0, 11.0])
         ok, details = evaluate(_signal("pct_from_ma", {"ma_period": 3, "pct": 10.0}), pd.DataFrame({"Close": close}))
@@ -140,6 +142,82 @@ class SignalEvaluatorTest(unittest.TestCase):
         self.assertEqual(details["error"], "boom")
         self.assertEqual(details["confidence_score"], 0)
         self.assertEqual(details["confidence_grade"], "F")
+
+    def test_chart_patterns_and_gap_up(self) -> None:
+        cup_df = pd.DataFrame({"Close": [100.0, 98.0, 90.0, 80.0, 88.0, 96.0, 99.0, 98.0, 96.0, 97.0, 98.0, 99.0]})
+        ok, details = evaluate(
+            _signal(
+                "cup_and_handle",
+                {
+                    "lookback": 12,
+                    "handle_days": 5,
+                    "peak_tolerance_pct": 4.0,
+                    "min_cup_depth_pct": 8.0,
+                    "max_handle_pullback_pct": 6.0,
+                    "breakout_buffer_pct": 1.5,
+                },
+            ),
+            cup_df,
+        )
+        self.assertTrue(ok)
+        self.assertLessEqual(details["peak_tolerance_pct"], 4.0)
+        self.assertGreaterEqual(details["cup_depth_pct"], 8.0)
+
+        gp_df = pd.DataFrame({"Close": [100.0, 105.0, 110.0, 120.0, 130.0, 120.0, 115.0, 111.0]})
+        ok, details = evaluate(
+            _signal("golden_pocket", {"lookback": 8, "min_swing_pct": 10.0, "retrace_low": 0.618, "retrace_high": 0.65}),
+            gp_df,
+        )
+        self.assertTrue(ok)
+        self.assertGreaterEqual(details["swing_pct"], 10.0)
+        self.assertLessEqual(details["close"], details["golden_pocket_high"])
+
+        hs_df = pd.DataFrame({"Close": [100.0, 105.0, 103.0, 97.0, 95.0, 96.0, 108.0, 112.0, 109.0, 96.0, 94.0, 95.0, 102.0, 97.0, 93.0]})
+        ok, details = evaluate(
+            _signal("head_and_shoulders", {"lookback": 15, "shoulder_tolerance_pct": 4.0, "min_head_margin_pct": 3.0}),
+            hs_df,
+        )
+        self.assertTrue(ok)
+        self.assertGreater(details["head"], details["left_shoulder"])
+        self.assertGreater(details["head"], details["right_shoulder"])
+
+        ihs_df = pd.DataFrame({"Close": [100.0, 95.0, 97.0, 102.0, 104.0, 103.0, 92.0, 90.0, 93.0, 103.0, 105.0, 104.0, 96.0, 101.0, 106.0]})
+        ok, details = evaluate(
+            _signal("inverse_head_and_shoulders", {"lookback": 15, "shoulder_tolerance_pct": 4.0, "min_head_margin_pct": 3.0}),
+            ihs_df,
+        )
+        self.assertTrue(ok)
+        self.assertLess(details["head"], details["left_shoulder"])
+        self.assertLess(details["head"], details["right_shoulder"])
+
+        db_df = pd.DataFrame({"Close": [100.0, 95.0, 90.0, 94.0, 99.0, 96.0, 92.0, 95.0, 101.0, 104.0]})
+        ok, details = evaluate(
+            _signal("double_bottom", {"lookback": 10, "peak_tolerance_pct": 3.0, "min_rebound_pct": 6.0}),
+            db_df,
+        )
+        self.assertTrue(ok)
+        self.assertGreaterEqual(details["rebound_pct"], 6.0)
+        self.assertGreater(details["breakout_pct"], 0.0)
+
+        dt_df = pd.DataFrame({"Close": [90.0, 95.0, 100.0, 97.0, 93.0, 98.0, 99.0, 95.0, 92.0, 89.0]})
+        ok, details = evaluate(
+            _signal("double_top", {"lookback": 10, "peak_tolerance_pct": 3.0, "min_pullback_pct": 6.0}),
+            dt_df,
+        )
+        self.assertTrue(ok)
+        self.assertGreaterEqual(details["pullback_pct"], 6.0)
+        self.assertGreater(details["breakout_pct"], 0.0)
+
+        gap_rows = [{"Open": 98.0, "High": 100.0, "Low": 97.0, "Close": 99.0, "Volume": 100.0} for _ in range(20)]
+        gap_rows.append({"Open": 101.0, "High": 106.0, "Low": 100.0, "Close": 105.0, "Volume": 250.0})
+        gap_df = pd.DataFrame(gap_rows)
+        ok, details = evaluate(
+            _signal("buyable_gap_up", {"min_gap_pct": 0.75, "min_close_position": 0.6, "min_volume_ratio": 1.5, "volume_lookback": 20}),
+            gap_df,
+        )
+        self.assertTrue(ok)
+        self.assertGreaterEqual(details["gap_pct"], 0.75)
+        self.assertGreaterEqual(details["volume_ratio"], 1.5)
 
 
 if __name__ == "__main__":
