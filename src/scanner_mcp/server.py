@@ -205,6 +205,8 @@ def create_signal(
     ticker_scope: Literal["tickers", "watchlist", "exchange"] = "watchlist",
     ticker_overrides: list[str] | None = None,
     exchange: str | None = None,
+    history_period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
+    interval: Annotated[str, Field(description="yfinance bar size for signal evaluation, e.g. 1d, 1wk, 1mo.")] = "1d",
 ) -> str:
     """Create a persisted enabled signal row.
 
@@ -215,8 +217,10 @@ def create_signal(
     `tickers` (set non-empty `ticker_overrides`; omit `exchange`), or `exchange` (set `exchange`; omit overrides).
     `ticker_overrides`: required when scope is `tickers` — list of ticker strings.
     `exchange`: when scope is `exchange`, exactly `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO` (omit otherwise).
+    `history_period`: yfinance history window fetched for this signal, e.g. `1y`, `2y`, `5y`, `max`.
+    `interval`: yfinance bar interval for this signal, e.g. `1d`, `1wk`, `1mo`.
     """
-    return create_signal_payload(get_store(), name, signal_type, params, ticker_scope, ticker_overrides, exchange)
+    return create_signal_payload(get_store(), name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval)
 
 
 @mcp.tool()
@@ -232,6 +236,8 @@ def list_signals() -> str:
             "ticker_scope": row.ticker_scope,
             "ticker_overrides": row.ticker_overrides,
             "exchange": row.exchange,
+            "history_period": row.history_period,
+            "interval": row.interval,
             "enabled": row.enabled,
         }
         for row in rows

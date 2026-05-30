@@ -13,3 +13,5 @@ class ActiveSignal:
     signal_type: str
     params: dict[str, Any]
     ticker_overrides: list[str] | None
+    history_period: str = "1y"
+    interval: str = "1d"

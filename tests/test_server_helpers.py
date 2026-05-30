@@ -215,6 +215,30 @@ class ServerHelpersTest(unittest.TestCase):
         self.assertIn("omit ticker_overrides", bad["error"])
         self.assertEqual(ex_bad["error"], "invalid exchange: BAD; use NYSE, NASDAQ, AMEX, or CRYPTO")
 
+    def test_create_signal_rejects_unsupported_intraday_history_combos(self) -> None:
+        class FakeStore:
+            def signal_create(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("signal_create should not be called for invalid input")
+
+        payload = json.loads(
+            signals_service.create_signal_payload(
+                FakeStore(),
+                "Intraday RSI",
+                "rsi_oversold",
+                None,
+                "tickers",
+                ["spy"],
+                None,
+                history_period="3mo",
+                interval="1h",
+            )
+        )
+
+        self.assertEqual(
+            payload["error"],
+            "unsupported history_period/interval combination: 3mo with 1h; intraday intervals require history_period of 1d, 5d, or 1mo",
+        )
+
     def test_get_ath_distance_handles_none_history(self) -> None:
         provider = FakeProvider(history=None)
 
@@ -255,6 +279,39 @@ class ServerHelpersTest(unittest.TestCase):
         self.assertEqual(payload["results"], [])
         self.assertEqual(payload["count"], 0)
         self.assertEqual(payload["errors"], [{"symbol": "SPY", "signal_id": 7, "error": "fetch failed"}])
+
+    def test_run_scan_payload_records_persisted_empty_history_errors(self) -> None:
+        class FakeStore:
+            def watchlist_get(self):  # noqa: ANN001
+                return []
+
+            def signal_list(self):  # noqa: ANN001
+                return [
+                    type(
+                        "SignalRow",
+                        (),
+                        {
+                            "id": 7,
+                            "name": "RSI Oversold",
+                            "signal_type": "rsi_oversold",
+                            "params": {},
+                            "ticker_overrides": ["SPY"],
+                            "ticker_scope": "tickers",
+                            "exchange": None,
+                            "enabled": True,
+                        },
+                    )()
+                ]
+
+        class EmptyProvider:
+            def get_history(self, _ticker: str, *, period: str, interval: str):  # noqa: ANN001
+                return pd.DataFrame()
+
+        payload = json.loads(signals_service.run_scan_payload(FakeStore(), EmptyProvider()))
+
+        self.assertEqual(payload["results"], [])
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["errors"], [{"symbol": "SPY", "signal_id": 7, "error": "no_history"}])
 
 
 if __name__ == "__main__":
