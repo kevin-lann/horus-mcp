@@ -1,91 +1,298 @@
 # scanner-mcp
 
-MCP server for market research, technical indicators (with buy/hold/sell ratings), signal scanning, charts (base64 PNG), and watchlists. Data via **yfinance**; persistence in **SQLite** at `~/.scanner_mcp/data.db` (override with `SCANNER_MCP_DB`). Connects to any MCP client (eg Claude Desktop, Openclaw, Cursor, Codex)
+`scanner-mcp` is an MCP server for stock and crypto market research. It provides price lookups, technical indicators, signal scanning, watchlists, research resources, and PNG chart tools that work in MCP clients such as Claude Desktop, Cursor, and Codex.
 
-## Setup
+Data comes primarily from `yfinance`, with SQLite persistence for saved signals, watchlists, alerts, and background scan jobs.
 
-**Requirements**:
+## Features
 
-- Python 3.11 ([download](https://www.python.org/downloads/))+
-- [Kaleido](https://github.com/plotly/Kaleido) for static PNG export; first chart run may install deps.
+- Look up current prices, market snapshots, options, gainers, and losers
+- Compute indicators such as RSI, MACD, moving averages, beta, and distance from all-time high
+- Save reusable signals (eg bull flag, MACD bullish crossover, cup & handle, golden pocket) and scan watchlists, custom ticker lists, or entire exchanges
+- Run scans in the background and poll for status/results later
+- Generate PNG charts for price action, overlays, relative strength, fundamentals, forward returns, breadth, drawdowns, and more
+- Expose MCP resources for recent alerts, watchlist symbols, and forward-return research
 
-Use a virtual environment so dependencies and the `scanner-mcp` entry point stay isolated from the system Python.
+## Prerequisites
+
+You need:
+
+- Python 3.11 or newer: https://www.python.org/downloads/
+
+Notes:
+
+- Charts are exported with `kaleido`, which is installed automatically with the Python dependencies.
+- The app stores its database at `~/.scanner_mcp/data.db` by default.
+
+## Quick Setup
 
 ```bash
 cd /path/to/scanner-mcp
 python3.11 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e .
+scanner-mcp
+```
+
+Windows PowerShell:
+
+```powershell
+cd C:\path\to\scanner-mcp
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+scanner-mcp
+```
+
+## Step-By-Step Local Setup
+
+<details>
+<summary>Show full beginner-friendly setup steps</summary>
+
+### 1. Download the project
+
+Download or clone this repo.
+
+### 2. Open a terminal in the project folder
+
+Change into the project directory:
+
+macOS / Linux:
+
+```bash
+cd ~/Projects/scanner-mcp
+```
+
+Windows PowerShell:
+
+```powershell
+cd C:\Users\YourName\Projects\scanner-mcp
+```
+
+### 3. Create a virtual environment
+
+This keeps the project isolated from the rest of your device.
+
+macOS / Linux:
+
+```bash
+python3.11 -m venv .venv
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv
+```
+
+If that does not work, try `python3 -m venv .venv` or `python -m venv .venv`.
+
+### 4. Activate the virtual environment
+
+macOS / Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+When it is active, you will see `(.venv)` at the beginning of the terminal prompt.
+
+### 5. Install the project
+
+Run:
+
+```bash
 pip install -e .
 ```
 
-## Run
+This installs the dependencies and the `scanner-mcp` command.
 
-With the venv activated:
+### 6. Start the server
+
+Run:
 
 ```bash
 scanner-mcp
 ```
 
-The default transport is **stdio**. Other MCP clients should run the same `scanner-mcp` command (full path to the venv’s binary if the client does not load your shell `PATH`).
+The server uses MCP `stdio` transport by default. Most MCP clients should launch this same command internally rather than having you run it manually in a separate terminal.
 
-**Env**
+</details>
 
-- `SCANNER_MCP_DB` — SQLite file path (overrides default)
-- `SCAN_TIME` — daily scan time `HH:MM` Eastern (default `16:30`)
-- `LOG_LEVEL` — default `INFO`
+## Connecting an MCP Client
 
-## Claude Desktop
+Most clients need the full path to the installed `scanner-mcp` executable inside `.venv`.
 
-1. Complete [Setup](#setup) so `.venv` exists and `pip install -e .` has been run.
-2. Open the Desktop config file:
-   - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-3. Add a `scanner-mcp` entry under `mcpServers` (use the real absolute path to your venv; merge with any servers you already have):
+### Claude Desktop
+
+1. Finish the setup steps above.
+2. Open the Claude Desktop MCP config file:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+3. Add a `scanner-mcp` server entry under `mcpServers`.
+4. Restart Claude Desktop.
+
+Example config on macOS:
 
 ```json
 {
   "mcpServers": {
     "scanner-mcp": {
-      "command": "~/Projects/scanner-mcp/.venv/bin/scanner-mcp",
+      "command": "/Users/yourname/Projects/scanner-mcp/.venv/bin/scanner-mcp",
       "args": []
     }
   }
 }
 ```
 
-4. Optional `env` block for the same variables as in **Env** above, e.g. `SCANNER_MCP_DB`, `SCAN_TIME`, `LOG_LEVEL`.
-5. Restart Claude Desktop.
+Example config on Windows:
 
-**Windows:** set `"command"` to the `.exe`, e.g. `C:\\path\\to\\scanner-mcp\\.venv\\Scripts\\scanner-mcp.exe`.
+```json
+{
+  "mcpServers": {
+    "scanner-mcp": {
+      "command": "C:\\Users\\yourname\\Projects\\scanner-mcp\\.venv\\Scripts\\scanner-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
 
-If the shim is not on `PATH` for your client, you can use the venv’s Python: `"command": "/path/to/.venv/bin/python"`, `"args": ["-m", "scanner_mcp.server"]`.
+If your MCP client has trouble finding the executable, use Python directly instead:
+
+macOS / Linux:
+
+```json
+{
+  "mcpServers": {
+    "scanner-mcp": {
+      "command": "/Users/yourname/Projects/scanner-mcp/.venv/bin/python",
+      "args": ["-m", "scanner_mcp"]
+    }
+  }
+}
+```
+
+Windows:
+
+```json
+{
+  "mcpServers": {
+    "scanner-mcp": {
+      "command": "C:\\Users\\yourname\\Projects\\scanner-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "scanner_mcp"]
+    }
+  }
+}
+```
+
+## Configuration
+
+Optional environment variables:
+
+| Variable | What it does | Default |
+| --- | --- | --- |
+| `SCANNER_MCP_DB` | Path to the SQLite database file | `~/.scanner_mcp/data.db` |
+| `SCAN_TIME` | Daily scheduled scan time in Eastern Time, format `HH:MM` | `16:30` |
+| `LOG_LEVEL` | Logging level | `INFO` |
+| `SCANNER_MCP_LOG_FILE` | Write logs to a file in addition to stderr | not set |
+| `SCANNER_MCP_SCAN_WORKERS` | Worker threads for background scan jobs | `2` |
+| `SCANNER_MCP_EXCHANGE_LIST_TTL` | Cache lifetime in seconds for exchange symbol lists | `3600` |
+| `SCANNER_MCP_EXCHANGE_MAX_SYMBOLS` | Optional cap on exchange universe size | not set |
+| `ALPHA_VANTAGE_API_KEY` | Enables Alpha Vantage fundamentals data where used | not set |
+| `ENABLE_DEBUG_PNG` | Saves chart debug PNGs when enabled (`1`, `true`, `yes`, `on`) | off |
 
 ## Tools
 
-- Market: `get_price`, `get_indicators`, `get_ath_distance`, `get_option_chain`, `market_snapshot`, `top_gainers`, `top_losers`
-- Signals: `list_signal_catalog`, `create_signal` (`params`: JSON object; `ticker_overrides`: string array when scope=tickers), `list_signals`, `delete_signal`, `run_scan` (`tickers`: string array)
-- Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
-- Charts (typed args): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle` — each uses `_chart_tool_result`, which on success returns a FastMCP `Image` (`Image(data=base64.b64decode(...))`: raw PNG bytes wrapped for an MCP image block). On failure it returns JSON text with an `error` field.
+### Market Data
 
-## Testing MCP server locally
+| Tool | Description |
+| --- | --- |
+| `debug_quote` | Debug helper for one symbol: raw quote fields, recent history, and resolved price fields. |
+| `get_price` | Current or latest price, previous close, day change, volume, and market cap. |
+| `get_indicators` | Technical indicators with per-indicator ratings and a consensus summary. |
+| `get_ath_distance` | Percent below all-time high using full available history. |
+| `get_option_chain` | Options chain preview for a ticker, with optional expiry date. |
+| `market_snapshot` | Snapshot of major US indices, ETFs, crypto, and volatility symbols. |
+| `top_gainers` | Top daily gainers for `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO`. |
+| `top_losers` | Top daily losers for `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO`. |
 
-Use the official MCP inspector tool for visual debugging:
+### Signals And Scans
+
+| Tool | Description |
+| --- | --- |
+| `list_signal_catalog` | Lists the built-in signal types and their default parameters. |
+| `create_signal` | Saves a signal to SQLite for later scanning. |
+| `list_signals` | Lists all saved signals. |
+| `delete_signal` | Deletes a saved signal and its alert history. |
+| `run_scan` | Runs a synchronous scan and returns triggered matches only. Best for smaller jobs. |
+| `start_scan` | Starts a background scan job and returns a `job_id` immediately. |
+| `get_scan_status` | Returns status and progress counters for a background scan job. |
+| `get_scan_result` | Reads the stored results of a completed background scan job. |
+| `cancel_scan` | Requests cancellation for a queued or running background scan job. |
+
+### Watchlist
+
+| Tool | Description |
+| --- | --- |
+| `add_to_watchlist` | Adds ticker symbols to the saved global watchlist. |
+| `remove_from_watchlist` | Removes ticker symbols from the saved global watchlist. |
+| `get_watchlist` | Returns the current saved watchlist. |
+
+### Charts
+
+All chart tools return a PNG image on success.
+
+| Tool | Description |
+| --- | --- |
+| `chart_price_history` | Candlestick or line-style price history with optional overlays such as SMA, EMA, Bollinger Bands, MA cloud, Fibonacci retracement, anchored VWAP, and P/E subchart. |
+| `chart_price_overlay` | Multi-symbol price comparison, optionally normalized. |
+| `chart_ratio` | Ratio chart of one asset divided by another. |
+| `chart_relative_strength` | Relative strength chart versus a benchmark with moving average and leadership shading. |
+| `chart_sector_rotation` | Sector or ETF comparison with a rolling return panel. |
+| `chart_fundamental_overlay` | Price chart with revenue or earnings bars overlaid. |
+| `chart_fundamental_momentum` | Multi-panel chart for price, revenue growth, profitability, and valuation. |
+| `chart_forward_returns` | Price chart with signal markers plus a forward-return study after historical events. |
+| `chart_basket_breadth` | Equal-weight basket vs benchmark with correlation and breadth panels. |
+| `chart_pairs_spread` | Pairs chart with spread or ratio plus z-score bands. |
+| `chart_drawdown_comparison` | Drawdown comparison across multiple symbols. |
+| `chart_log_cycle` | Long-term log-scale cycle chart, useful for assets like BTC. |
+
+## MCP Resources
+
+| Resource | Description |
+| --- | --- |
+| `signals://triggered` | Recent triggered alerts as JSON. |
+| `signals://watchlist` | Current watchlist symbols as JSON. |
+| `research://forward-returns/{symbol}/{event_type}` | Markdown forward-return summary for a symbol and event type. |
+
+## Local Testing
+
+### MCP Inspector
+
+For interactive MCP debugging:
 
 ```bash
 npx @modelcontextprotocol/inspector scanner-mcp
 ```
 
-## Unit tests
+### Unit Tests
 
-Run unit tests for the entire repo using:
+Run the test suite:
 
 ```bash
 python3 -m pytest
 ```
 
-## Local tool testing
+### Smoke Testing Individual Tools
 
-Use `test.py` to smoke-test tools directly from the repo without starting an MCP client. Run it from the project root after setup:
+The repo includes `test.py` for direct local testing without an MCP client:
 
 ```bash
 source .venv/bin/activate
@@ -107,48 +314,39 @@ python3 test.py --tool chart --chart-type price_overlay --symbols SPY QQQ --peri
 python3 test.py --tool all --symbol SPY
 ```
 
-Chart tests print a compact base64 summary and save debug PNGs to `output/`.
-
-Tests that modify the local SQLite database are opt-in:
+Examples that modify the local SQLite database:
 
 ```bash
 python3 test.py --tool watchlist --mutate --symbols AAPL MSFT
-python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT AMZN META VST BTC HOOD BE LITE SOFI COIN MSTR PLTR TSM MU NVDA AMD PLTR NFLX PATH ZETA NOW CEG UUUU MA RDDT SNDK CLS IREN APLD NBIS CRWV ASTS RKLB ORCL
+python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT
 python3 test.py --tool scan
 python3 test.py --tool scan --symbols AAPL MSFT
 python3 test.py --tool delete_signal --mutate --signal-id 1
 ```
 
-By default, `scan` does not pass a ticker override. It lets each persisted signal use its own `ticker_overrides`, or the global watchlist when a signal has no overrides. Add `--symbols` only when you want to override the scan tickers for the test run.
+## SQLite Database
 
-## Resources
+Open the default database from the command line:
 
-- `signals://triggered` — recent alerts (JSON)
-- `signals://watchlist` — tickers (JSON)
-- `research://forward-returns/{symbol}/{event_type}` — markdown table (`event_type`: `rsi_oversold` | `rsi_overbought` | `golden_cross` | `macd_bullish_crossover` | `pct_from_ma`)
-
-Forward-return charts show a price panel with historical signal markers plus a summary table. Default horizons are 21, 42, 63, 84, 105, 126, and 252 daily trading bars. `chart_forward_returns` accepts optional `event_params`; for `pct_from_ma`, pass values such as `{"ma_type":"ema","ma_period":200,"pct":3}`.
-
-## Connecting to the SQLite DB
-
-Using CLI:
 ```bash
 sqlite3 ~/.scanner_mcp/data.db
 ```
-Useful once inside:
 
-- `.tables` — list tables (watchlist, signals, alerts).
-- `.schema alerts` — column layout.
+Useful commands:
+
+- `.tables`
+- `.schema alerts`
 - `SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT 20;`
 - `SELECT * FROM signals;`
 - `SELECT * FROM watchlist;`
 - `.quit`
 
-One-shot from the shell:
+One-shot query:
+
 ```bash
 sqlite3 ~/.scanner_mcp/data.db "SELECT id, signal_id, symbol, triggered_at FROM alerts ORDER BY triggered_at DESC LIMIT 10;"
 ```
 
 ## Disclaimer
 
-Not financial advice. Heuristic buy/hold/sell tags are for tooling only.
+This project is for research and tooling only. It is not financial advice.
