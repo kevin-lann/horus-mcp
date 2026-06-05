@@ -1,8 +1,13 @@
 # scanner-mcp
 
-MCP server for market research, technical indicators (with buy/hold/sell ratings), signal scanning, charts (base64 PNG), and watchlists. Data via **yfinance**; persistence in **SQLite** at `~/.scanner_mcp/data.db` (override with `SCANNER_MCP_DB`).
+MCP server for market research, technical indicators (with buy/hold/sell ratings), signal scanning, charts (base64 PNG), and watchlists. Data via **yfinance**; persistence in **SQLite** at `~/.scanner_mcp/data.db` (override with `SCANNER_MCP_DB`). Connects to any MCP client (eg Claude Desktop, Openclaw, Cursor, Codex)
 
 ## Setup
+
+**Requirements**:
+
+- Python 3.11 ([download](https://www.python.org/downloads/))+
+- [Kaleido](https://github.com/plotly/Kaleido) for static PNG export; first chart run may install deps.
 
 Use a virtual environment so dependencies and the `scanner-mcp` entry point stay isolated from the system Python.
 
@@ -62,8 +67,18 @@ If the shim is not on `PATH` for your client, you can use the venv’s Python: `
 - Watchlist: `add_to_watchlist`, `remove_from_watchlist`, `get_watchlist` (`symbols`: array of tickers)
 - Charts (typed args): `chart_price_history`, `chart_price_overlay`, `chart_forward_returns`, `chart_drawdown_comparison`, `chart_log_cycle` — each uses `_chart_tool_result`, which on success returns a FastMCP `Image` (`Image(data=base64.b64decode(...))`: raw PNG bytes wrapped for an MCP image block). On failure it returns JSON text with an `error` field.
 
+## Testing MCP server locally
+
+Use the official MCP inspector tool for visual debugging:
+
+```bash
+npx @modelcontextprotocol/inspector scanner-mcp
+```
+
 ## Unit tests
+
 Run unit tests for the entire repo using:
+
 ```bash
 python3 -m pytest
 ```
@@ -106,14 +121,6 @@ python3 test.py --tool delete_signal --mutate --signal-id 1
 
 By default, `scan` does not pass a ticker override. It lets each persisted signal use its own `ticker_overrides`, or the global watchlist when a signal has no overrides. Add `--symbols` only when you want to override the scan tickers for the test run.
 
-## Testing MCP server locally
-
-Use the official MCP inspector tool for visual debugging:
-
-```bash
-npx @modelcontextprotocol/inspector scanner-mcp
-```
-
 ## Resources
 
 - `signals://triggered` — recent alerts (JSON)
@@ -141,11 +148,6 @@ One-shot from the shell:
 ```bash
 sqlite3 ~/.scanner_mcp/data.db "SELECT id, signal_id, symbol, triggered_at FROM alerts ORDER BY triggered_at DESC LIMIT 10;"
 ```
-
-## Requirements
-
-- Python 3.11+
-- [Kaleido](https://github.com/plotly/Kaleido) for static PNG export; first chart run may install deps.
 
 ## Disclaimer
 
