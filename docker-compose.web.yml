@@ -1,0 +1,42 @@
+services:
+  mcp-server:
+    build:
+      context: .
+    environment:
+      SCANNER_MCP_HTTP_HOST: 0.0.0.0
+      SCANNER_MCP_HTTP_PORT: 5050
+      SCANNER_MCP_DB: /data/scanner.db
+    ports:
+      - "5050:5050"
+    volumes:
+      - scanner-mcp-data:/data
+
+  backend:
+    build:
+      context: ../scanner-web-backend
+    depends_on:
+      - mcp-server
+    environment:
+      PORT: 8080
+      MCP_SERVER_URL: http://mcp-server:5050/mcp
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+      TURSO_DATABASE_URL: ${TURSO_DATABASE_URL}
+      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN}
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ../scanner-web-frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8080
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+    ports:
+      - "3000:3000"
+
+volumes:
+  scanner-mcp-data:

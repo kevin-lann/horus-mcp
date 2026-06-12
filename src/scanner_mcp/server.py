@@ -35,6 +35,7 @@ from scanner_mcp.runtime import (
     shutdown_scheduler,
     scan_job_payload,
 )
+from scanner_mcp.db.store import DEFAULT_USER_ID
 from scanner_mcp.signals.catalog import list_catalog_entries
 from scanner_mcp.signals.service import create_signal_payload, run_scan_payload
 
@@ -207,6 +208,7 @@ def create_signal(
     exchange: str | None = None,
     history_period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
     interval: Annotated[str, Field(description="yfinance bar size for signal evaluation, e.g. 1d, 1wk, 1mo.")] = "1d",
+    user_id: str = DEFAULT_USER_ID,
 ) -> str:
     """Create a persisted enabled signal row.
 
@@ -220,13 +222,13 @@ def create_signal(
     `history_period`: yfinance history window fetched for this signal, e.g. `1y`, `2y`, `5y`, `max`.
     `interval`: yfinance bar interval for this signal, e.g. `1d`, `1wk`, `1mo`.
     """
-    return create_signal_payload(get_store(), name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval)
+    return create_signal_payload(get_store(), user_id, name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval)
 
 
 @mcp.tool()
-def list_signals() -> str:
+def list_signals(user_id: str = DEFAULT_USER_ID) -> str:
     """List configured signals (includes `id` for `delete_signal` / `run_scan`)."""
-    rows = get_store().signal_list()
+    rows = get_store().signal_list(user_id)
     payload = [
         {
             "id": row.id,
@@ -246,13 +248,14 @@ def list_signals() -> str:
 
 
 @mcp.tool()
-def delete_signal(signal_id: int) -> str:
+def delete_signal(signal_id: int, user_id: str = DEFAULT_USER_ID) -> str:
     """Delete a signal and its alert history. `signal_id` is the integer `id` from `list_signals`."""
-    return json.dumps({"ok": get_store().signal_delete(signal_id)})
+    return json.dumps({"ok": get_store().signal_delete(user_id, signal_id)})
 
 
 @mcp.tool()
 def run_scan(
+    user_id: str = DEFAULT_USER_ID,
     signal_id: int | None = None,
     tickers: list[str] | None = None,
     all_signal_types: bool = False,
@@ -275,11 +278,12 @@ def run_scan(
     `all_signal_types`: when true together with exactly one universe selector above, run **every** catalog
     signal type against that universe (`signal_id` must be omitted); uses 1 year of daily bars per symbol.
     """
-    return run_scan_payload(get_store(), get_provider(), signal_id, tickers, all_signal_types, symbol, exchange)
+    return run_scan_payload(get_store(), get_provider(), user_id, signal_id, tickers, all_signal_types, symbol, exchange)
 
 
 @mcp.tool()
 def start_scan(
+    user_id: str = DEFAULT_USER_ID,
     signal_id: int | None = None,
     tickers: list[str] | None = None,
     all_signal_types: bool = False,
@@ -309,13 +313,14 @@ def start_scan(
     signal type against that universe (`signal_id` must be omitted).
     """
     job_id = start_scan_job(
+        user_id=user_id,
         signal_id=signal_id,
         tickers=tickers,
         all_signal_types=all_signal_types,
         symbol=symbol,
         exchange=exchange,
     )
-    payload = scan_job_payload(job_id)
+    payload = scan_job_payload(job_id, user_id)
     payload["poll_after_seconds"] = 2
     payload["next_action"] = (
         "Poll get_scan_status(job_id) until status is completed, failed, or cancelled. "
@@ -325,7 +330,7 @@ def start_scan(
 
 
 @mcp.tool()
-def get_scan_status(job_id: int) -> str:
+def get_scan_status(job_id: int, user_id: str = DEFAULT_USER_ID) -> str:
     """Return scan job status and progress counters for a previously started background scan.
 
     Client behavior:
@@ -339,7 +344,7 @@ def get_scan_status(job_id: int) -> str:
     - `fired_count`: number of triggered matches found so far.
     - `result_count`: number of rows that will appear in `get_scan_result`.
     """
-    payload = scan_job_payload(job_id)
+    payload = scan_job_payload(job_id, user_id)
     if "error" not in payload and payload["status"] in {"queued", "running"}:
         payload["poll_after_seconds"] = 2
         payload["next_action"] = "Poll get_scan_status(job_id) again after a short delay."
@@ -349,7 +354,7 @@ def get_scan_status(job_id: int) -> str:
 
 
 @mcp.tool()
-def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0) -> str:
+def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0, user_id: str = DEFAULT_USER_ID) -> str:
     """Return the stored final result for a completed background scan.
 
     Use this only after `get_scan_status(job_id)` reports `status=completed`. This tool never
@@ -361,11 +366,11 @@ def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0) -> s
 
     If the job is not completed yet, this tool returns a small status payload instead of partial results.
     """
-    row = get_store().scan_job_get(job_id)
+    row = get_store().scan_job_get(user_id, job_id)
     if row is None:
         return json.dumps({"error": "scan job not found", "job_id": job_id})
     if row.status != "completed":
-        payload = scan_job_payload(job_id)
+        payload = scan_job_payload(job_id, user_id)
         payload["next_action"] = "Wait for status=completed before requesting results."
         return json.dumps(payload, indent=2, default=str)
     result = dict(row.result or {})
@@ -385,39 +390,39 @@ def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0) -> s
 
 
 @mcp.tool()
-def cancel_scan(job_id: int) -> str:
+def cancel_scan(job_id: int, user_id: str = DEFAULT_USER_ID) -> str:
     """Request cancellation for a queued or running background scan job.
 
     Cancellation is best-effort and cooperative. After calling this tool, poll
     `get_scan_status(job_id)` until the job reaches `cancelled`, `completed`, or `failed`.
     """
-    ok = get_store().scan_job_request_cancel(job_id)
-    payload = scan_job_payload(job_id)
+    ok = get_store().scan_job_request_cancel(user_id, job_id)
+    payload = scan_job_payload(job_id, user_id)
     payload["cancel_request_accepted"] = ok
     payload["next_action"] = "Poll get_scan_status(job_id) to observe the terminal state."
     return json.dumps(payload, indent=2, default=str)
 
 
 @mcp.tool()
-def add_to_watchlist(symbols: list[str]) -> str:
+def add_to_watchlist(symbols: list[str], user_id: str = DEFAULT_USER_ID) -> str:
     """`add_to_watchlist`: append ticker strings supplied in `symbols` to the global watchlist.
 
     `symbols` is a native Python list of tickers (`list[str]`); under MCP structured tool calls this is encoded as a JSON array.
     Returns JSON text: `{"added": [...]}` where `added` lists tickers inserted in this invocation (symbols already stored are omitted).
     """
-    return json.dumps({"added": get_store().watchlist_add([str(value) for value in symbols])})
+    return json.dumps({"added": get_store().watchlist_add(user_id, [str(value) for value in symbols])})
 
 
 @mcp.tool()
-def remove_from_watchlist(symbols: list[str]) -> str:
+def remove_from_watchlist(symbols: list[str], user_id: str = DEFAULT_USER_ID) -> str:
     """Remove symbols from the watchlist (`symbols`: array of tickers)."""
-    return json.dumps({"removed": get_store().watchlist_remove([str(value) for value in symbols])})
+    return json.dumps({"removed": get_store().watchlist_remove(user_id, [str(value) for value in symbols])})
 
 
 @mcp.tool()
-def get_watchlist() -> str:
+def get_watchlist(user_id: str = DEFAULT_USER_ID) -> str:
     """Return the current watchlist as a JSON array of ticker strings."""
-    return json.dumps([row.symbol for row in get_store().watchlist_get()], indent=2)
+    return json.dumps([row.symbol for row in get_store().watchlist_get(user_id)], indent=2)
 
 
 @mcp.tool()
@@ -657,18 +662,18 @@ def chart_log_cycle(
     return chart_tool_result(get_provider(), "log_cycle", {"symbol": symbol, "period": period})
 
 
-@mcp.resource("signals://triggered", mime_type="application/json")
-def resource_triggered() -> str:
-    """Last 50 fired alerts (JSON)."""
-    rows = get_store().alerts_recent(50)
+@mcp.resource("signals://triggered/{user_id}", mime_type="application/json")
+def resource_triggered(user_id: str) -> str:
+    """Last 50 fired alerts for one user (JSON)."""
+    rows = get_store().alerts_recent(user_id, 50)
     payload = [{"id": row.id, "signal_id": row.signal_id, "symbol": row.symbol, "triggered_at": row.triggered_at, "details": row.details} for row in rows]
     return json.dumps(payload, default=str, indent=2)
 
 
-@mcp.resource("signals://watchlist", mime_type="application/json")
-def resource_watchlist() -> str:
-    """Active watchlist tickers (JSON)."""
-    return json.dumps([row.symbol for row in get_store().watchlist_get()])
+@mcp.resource("signals://watchlist/{user_id}", mime_type="application/json")
+def resource_watchlist(user_id: str) -> str:
+    """Active watchlist tickers for one user (JSON)."""
+    return json.dumps([row.symbol for row in get_store().watchlist_get(user_id)])
 
 
 @mcp.resource("research://forward-returns/{symbol}/{event_type}", mime_type="text/markdown")
@@ -687,6 +692,22 @@ def main() -> None:
     old_sigint, old_sigterm = install_signal_handlers()
     try:
         mcp.run()
+    finally:
+        shutdown_scheduler()
+        restore_signal_handlers(old_sigint, old_sigterm)
+
+
+def main_http() -> None:
+    """Configure logging and run the FastMCP HTTP server for sidecar deployment."""
+    import os
+
+    configure_logging()
+    host = os.environ.get("SCANNER_MCP_HTTP_HOST", "0.0.0.0")
+    port = int(os.environ.get("SCANNER_MCP_HTTP_PORT", "5050"))
+    log.info("Starting ScannerMCP HTTP server on %s:%s from %s", host, port, __file__)
+    old_sigint, old_sigterm = install_signal_handlers()
+    try:
+        mcp.run(transport="http", host=host, port=port)
     finally:
         shutdown_scheduler()
         restore_signal_handlers(old_sigint, old_sigterm)

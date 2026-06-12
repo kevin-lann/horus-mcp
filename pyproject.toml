@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 scanner-mcp = "scanner_mcp.server:main"
+scanner-mcp-http = "scanner_mcp.server:main_http"
 
 [tool.setuptools.packages.find]
 where = ["src"]

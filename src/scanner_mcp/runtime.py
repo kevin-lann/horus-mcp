@@ -13,7 +13,7 @@ from apscheduler.schedulers.base import BaseScheduler
 from fastmcp import FastMCP
 
 from scanner_mcp.data.provider import CompositeDataProvider, DataProvider
-from scanner_mcp.db.store import Store
+from scanner_mcp.db.store import DEFAULT_USER_ID, Store
 from scanner_mcp.scanner import scheduler as scan_sched
 from scanner_mcp.signals.service import ScanCancelledError, execute_scan
 
@@ -70,8 +70,8 @@ def get_provider() -> DataProvider:
         _provider = CompositeDataProvider.default()
     return _provider
 
-def scan_job_payload(job_id: int) -> dict[str, Any]:
-    row = get_store().scan_job_get(job_id)
+def scan_job_payload(job_id: int, user_id: str = DEFAULT_USER_ID) -> dict[str, Any]:
+    row = get_store().scan_job_get(user_id, job_id)
     if row is None:
         return {"error": "scan job not found", "job_id": job_id}
     return {
@@ -88,6 +88,7 @@ def scan_job_payload(job_id: int) -> dict[str, Any]:
         "cancel_requested": row.cancel_requested,
         "params": row.params,
         "error": row.error,
+        "user_id": row.user_id,
     }
 
 
@@ -104,6 +105,7 @@ def _scan_executor_instance() -> ThreadPoolExecutor:
 
 def start_scan_job(
     *,
+    user_id: str = DEFAULT_USER_ID,
     signal_id: int | None = None,
     tickers: list[str] | None = None,
     all_signal_types: bool = False,
@@ -119,11 +121,12 @@ def start_scan_job(
         "symbol": symbol,
         "exchange": exchange,
     }
-    job_id = store.scan_job_create("run_scan", params)
+    job_id = store.scan_job_create(user_id, "run_scan", params)
 
     def _run() -> None:
-        if not store.scan_job_mark_running(job_id):
+        if not store.scan_job_mark_running(user_id, job_id):
             store.scan_job_mark_cancelled(
+                user_id,
                 job_id,
                 checked_count=0,
                 fired_count=0,
@@ -135,28 +138,31 @@ def start_scan_job(
             result = execute_scan(
                 store,
                 get_provider(),
+                user_id=user_id,
                 signal_id=signal_id,
                 tickers=tickers,
                 all_signal_types=all_signal_types,
                 symbol=symbol,
                 exchange=exchange,
                 progress_callback=lambda checked_count, fired_count, result_count, total_count: store.scan_job_update_progress(
+                    user_id,
                     job_id,
                     checked_count=checked_count,
                     fired_count=fired_count,
                     result_count=result_count,
                     total_count=total_count,
                 ),
-                cancel_check=lambda: store.scan_job_is_cancel_requested(job_id),
+                cancel_check=lambda: store.scan_job_is_cancel_requested(user_id, job_id),
             )
-            store.scan_job_complete(job_id, result)
+            store.scan_job_complete(user_id, job_id, result)
         except ScanCancelledError:
-            latest = store.scan_job_get(job_id)
+            latest = store.scan_job_get(user_id, job_id)
             checked_count = latest.checked_count if latest else 0
             fired_count = latest.fired_count if latest else 0
             result_count = latest.result_count if latest else 0
             total_count = latest.total_count if latest else None
             store.scan_job_mark_cancelled(
+                user_id,
                 job_id,
                 checked_count=checked_count,
                 fired_count=fired_count,
@@ -165,7 +171,7 @@ def start_scan_job(
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("background scan job %s failed", job_id)
-            store.scan_job_fail(job_id, str(exc))
+            store.scan_job_fail(user_id, job_id, str(exc))
         finally:
             _scan_futures.pop(job_id, None)
 
