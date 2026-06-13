@@ -107,7 +107,6 @@ class Store:
                     added_at TEXT NOT NULL,
                     UNIQUE (user_id, symbol)
                 );
-                CREATE INDEX IF NOT EXISTS idx_watchlist_user_symbol ON watchlist (user_id, symbol);
 
                 CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY,
@@ -121,9 +120,9 @@ class Store:
                     history_period TEXT NOT NULL DEFAULT '1y',
                     interval TEXT NOT NULL DEFAULT '1d',
                     enabled INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    UNIQUE (id, user_id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_signals_user_created ON signals (user_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS alerts (
                     id INTEGER PRIMARY KEY,
@@ -132,9 +131,8 @@ class Store:
                     symbol TEXT NOT NULL,
                     triggered_at TEXT NOT NULL,
                     details TEXT,
-                    FOREIGN KEY (signal_id) REFERENCES signals (id) ON DELETE CASCADE
+                    FOREIGN KEY (signal_id, user_id) REFERENCES signals (id, user_id) ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_alerts_user_time ON alerts (user_id, triggered_at DESC);
 
                 CREATE TABLE IF NOT EXISTS scan_jobs (
                     id INTEGER PRIMARY KEY,
@@ -153,10 +151,17 @@ class Store:
                     result_json TEXT,
                     error TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_scan_jobs_user_requested_time ON scan_jobs (user_id, requested_at DESC);
                 """
             )
             self._migrate_legacy_schema(c)
+            c.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_watchlist_user_symbol ON watchlist (user_id, symbol);
+                CREATE INDEX IF NOT EXISTS idx_signals_user_created ON signals (user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_user_time ON alerts (user_id, triggered_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_scan_jobs_user_requested_time ON scan_jobs (user_id, requested_at DESC);
+                """
+            )
 
     def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
         """Upgrade older single-user tables to the current user-scoped schema."""
@@ -193,7 +198,8 @@ class Store:
                     history_period TEXT NOT NULL DEFAULT '1y',
                     interval TEXT NOT NULL DEFAULT '1d',
                     enabled INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    UNIQUE (id, user_id)
                 )
             """,
             copy_sql="""
@@ -228,7 +234,7 @@ class Store:
                     symbol TEXT NOT NULL,
                     triggered_at TEXT NOT NULL,
                     details TEXT,
-                    FOREIGN KEY (signal_id) REFERENCES signals (id) ON DELETE CASCADE
+                    FOREIGN KEY (signal_id, user_id) REFERENCES signals (id, user_id) ON DELETE CASCADE
                 )
             """,
             copy_sql="""
@@ -450,6 +456,11 @@ class Store:
         now = _utc_now()
         user_id = _normalize_user_id(user_id)
         with self._conn() as c:
+            if not c.execute(
+                "SELECT id FROM signals WHERE id = ? AND user_id = ?",
+                (signal_id, user_id),
+            ).fetchone():
+                raise ValueError(f"signal {signal_id} not found for user {user_id!r}")
             c.execute(
                 "INSERT INTO alerts (user_id, signal_id, symbol, triggered_at, details) VALUES (?, ?, ?, ?, ?)",
                 (user_id, signal_id, symbol.upper(), now, json.dumps(details)),

@@ -323,8 +323,8 @@ def start_scan(
     payload = scan_job_payload(job_id, user_id)
     payload["poll_after_seconds"] = 2
     payload["next_action"] = (
-        "Poll get_scan_status(job_id) until status is completed, failed, or cancelled. "
-        "Then call get_scan_result(job_id) if completed."
+        f"Poll get_scan_status({job_id}, user_id={user_id!r}) until status is completed, failed, or cancelled. "
+        f"Then call get_scan_result({job_id}, user_id={user_id!r}) if completed."
     )
     return json.dumps(payload, indent=2, default=str)
 
@@ -347,9 +347,9 @@ def get_scan_status(job_id: int, user_id: str = DEFAULT_USER_ID) -> str:
     payload = scan_job_payload(job_id, user_id)
     if "error" not in payload and payload["status"] in {"queued", "running"}:
         payload["poll_after_seconds"] = 2
-        payload["next_action"] = "Poll get_scan_status(job_id) again after a short delay."
+        payload["next_action"] = f"Poll get_scan_status({job_id}, user_id={user_id!r}) again after a short delay."
     elif "error" not in payload and payload["status"] == "completed":
-        payload["next_action"] = "Call get_scan_result(job_id) to read the final stored results."
+        payload["next_action"] = f"Call get_scan_result({job_id}, user_id={user_id!r}) to read the final stored results."
     return json.dumps(payload, indent=2, default=str)
 
 
@@ -371,7 +371,7 @@ def get_scan_result(job_id: int, limit: int | None = None, offset: int = 0, user
         return json.dumps({"error": "scan job not found", "job_id": job_id})
     if row.status != "completed":
         payload = scan_job_payload(job_id, user_id)
-        payload["next_action"] = "Wait for status=completed before requesting results."
+        payload["next_action"] = f"Poll get_scan_status({job_id}, user_id={user_id!r}) until status=completed, then retry get_scan_result({job_id}, user_id={user_id!r})."
         return json.dumps(payload, indent=2, default=str)
     result = dict(row.result or {})
     rows = list(result.get("results", []))
@@ -399,7 +399,7 @@ def cancel_scan(job_id: int, user_id: str = DEFAULT_USER_ID) -> str:
     ok = get_store().scan_job_request_cancel(user_id, job_id)
     payload = scan_job_payload(job_id, user_id)
     payload["cancel_request_accepted"] = ok
-    payload["next_action"] = "Poll get_scan_status(job_id) to observe the terminal state."
+    payload["next_action"] = f"Poll get_scan_status({job_id}, user_id={user_id!r}) to observe the terminal state."
     return json.dumps(payload, indent=2, default=str)
 
 

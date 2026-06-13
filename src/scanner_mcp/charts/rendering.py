@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 import io
 import logging
 import os
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 
 log = logging.getLogger(__name__)
@@ -31,8 +33,32 @@ def save_debug_png(chart_type: str, png_bytes: bytes) -> None:
     (_OUTPUT_DIR / filename).write_bytes(png_bytes)
 
 
+def _json_safe_plotly_value(value: object) -> object:
+    """Convert datetime-like Pandas/NumPy values into JSON-safe primitives."""
+    if isinstance(value, dict):
+        return {key: _json_safe_plotly_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_plotly_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_json_safe_plotly_value(item) for item in value.tolist()]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.datetime64):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, pd.Timedelta):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def fig_to_b64(fig: go.Figure, chart_type: str) -> str:
     """Render a Plotly figure to PNG bytes, save a debug copy, and return base64."""
+    fig = go.Figure(_json_safe_plotly_value(fig.to_dict()))
     buf = io.BytesIO()
     fig.write_image(buf, format="png", engine="kaleido", scale=1.5)
     buf.seek(0)

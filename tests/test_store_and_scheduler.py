@@ -82,7 +82,9 @@ class SchedulerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store = Store(Path(td) / "test.db")
             store.watchlist_add("user-a", ["SPY"])
-            sid = store.signal_create("user-a", "RSI", "rsi_oversold", {}, None)
+            sid_a = store.signal_create("user-a", "RSI", "rsi_oversold", {}, None)
+            store.watchlist_add("user-b", ["QQQ"])
+            sid_b = store.signal_create("user-b", "RSI-B", "rsi_oversold", {}, None)
 
             class Provider:
                 def get_history(self, symbol: str, *, period: str, interval: str) -> pd.DataFrame:
@@ -95,13 +97,19 @@ class SchedulerTest(unittest.TestCase):
             ):
                 result = scheduler.run_full_scan(store, Provider(), notify=True)  # type: ignore[arg-type]
 
-            self.assertEqual(result["checked"], 1)
-            self.assertEqual(result["fired"], 1)
-            self.assertEqual(result["alerts"][0]["user_id"], "user-a")
-            self.assertEqual(result["alerts"][0]["signal_id"], sid)
+            self.assertEqual(result["checked"], 2)
+            self.assertEqual(result["fired"], 2)
+            user_ids_in_alerts = {a["user_id"] for a in result["alerts"]}
+            self.assertIn("user-a", user_ids_in_alerts)
+            self.assertIn("user-b", user_ids_in_alerts)
+            alert_a = next(a for a in result["alerts"] if a["user_id"] == "user-a")
+            alert_b = next(a for a in result["alerts"] if a["user_id"] == "user-b")
+            self.assertEqual(alert_a["signal_id"], sid_a)
+            self.assertEqual(alert_b["signal_id"], sid_b)
             self.assertEqual(store.alerts_recent("user-a")[0].details, {"rsi": 20.0})
-            eval_mock.assert_called_once()
-            notify_mock.assert_called_once()
+            self.assertEqual(store.alerts_recent("user-b")[0].details, {"rsi": 20.0})
+            self.assertEqual(eval_mock.call_count, 2)
+            self.assertEqual(notify_mock.call_count, 2)
 
     def test_scan_job_swallows_exceptions(self) -> None:
         with patch("scanner_mcp.scanner.scheduler.run_full_scan", side_effect=RuntimeError("boom")):
