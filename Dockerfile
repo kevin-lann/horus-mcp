@@ -15,6 +15,7 @@ EXPOSE 5050
 # Create a non-root user and group for the app
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 RUN chown -R appuser:appgroup /app
+RUN mkdir -p /data && chown -R appuser:appgroup /data
 USER appuser
 
 CMD ["scanner-mcp-http"]
