@@ -26,6 +26,7 @@ _sched: BaseScheduler | None = None
 _scan_executor: ThreadPoolExecutor | None = None
 _scan_futures: dict[int, Future[None]] = {}
 TRANSPORT_USER_ID_HEADER = "x-scanner-user-id"
+STDIO_USER_ID_ENV = "SCANNER_MCP_USER_ID"
 
 
 def shutdown_scheduler() -> None:
@@ -74,7 +75,7 @@ def get_provider() -> DataProvider:
 
 
 def get_request_user_id() -> str:
-    """Resolve the authenticated tenant from FastMCP auth or transport headers."""
+    """Resolve the authenticated tenant from FastMCP auth, transport headers, or stdio env."""
     access_token = get_access_token()
     if access_token is not None:
         for claim_name in ("sub", "user_id"):
@@ -91,6 +92,10 @@ def get_request_user_id() -> str:
         header_value = request.headers.get(TRANSPORT_USER_ID_HEADER, "").strip()
         if header_value:
             return header_value
+
+    env_user_id = os.environ.get(STDIO_USER_ID_ENV, "").strip()
+    if env_user_id:
+        return env_user_id
 
     return DEFAULT_USER_ID
 
