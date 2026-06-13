@@ -56,59 +56,67 @@ def run_full_scan(
     """
     result: dict[str, Any] = {"checked": 0, "fired": 0, "alerts": []}
     try:
-        sig_rows = [s for s in store.signal_list() if s.enabled]
+        user_ids = store.all_user_ids()
     except Exception:  # noqa: BLE001
-        log.exception("signal list")
+        log.exception("user list")
         return result
-    watch = [w.symbol for w in store.watchlist_get()]
 
-    for srow in sig_rows:
-        tickers = _tickers_for_signal(srow, watch)
-        if not tickers:
-            log.debug("Signal %s has no symbols to scan", srow.id)
+    for user_id in user_ids:
+        try:
+            sig_rows = [s for s in store.signal_list(user_id) if s.enabled]
+        except Exception:  # noqa: BLE001
+            log.exception("signal list for user %s", user_id)
             continue
-        asig = ActiveSignal(
-            id=srow.id,
-            name=srow.name,
-            signal_type=srow.signal_type,
-            params=srow.params,
-            ticker_overrides=srow.ticker_overrides,
-            history_period=srow.history_period,
-            interval=srow.interval,
-        )
-        for sym in tickers:
-            result["checked"] += 1
-            try:
-                df = provider.get_history(sym, period=asig.history_period, interval=asig.interval)
-            except Exception as e:  # noqa: BLE001
-                log.debug("history %s: %s", sym, e)
+        watch = [w.symbol for w in store.watchlist_get(user_id)]
+
+        for srow in sig_rows:
+            tickers = _tickers_for_signal(srow, watch)
+            if not tickers:
+                log.debug("Signal %s has no symbols to scan", srow.id)
                 continue
-            if df is None or df.empty:
-                continue
-            try:
-                trig, det = evaluate(asig, df)
-            except Exception as e:  # noqa: BLE001
-                log.debug("eval %s: %s", sym, e)
-                continue
-            if trig:
-                result["fired"] += 1
-                result["alerts"].append(
-                    {
-                        "signal_id": srow.id,
-                        "name": srow.name,
-                        "symbol": sym,
-                        "details": det,
-                    }
-                )
+            asig = ActiveSignal(
+                id=srow.id,
+                name=srow.name,
+                signal_type=srow.signal_type,
+                params=srow.params,
+                ticker_overrides=srow.ticker_overrides,
+                history_period=srow.history_period,
+                interval=srow.interval,
+            )
+            for sym in tickers:
+                result["checked"] += 1
                 try:
-                    store.alert_insert(srow.id, sym, det)
+                    df = provider.get_history(sym, period=asig.history_period, interval=asig.interval)
                 except Exception as e:  # noqa: BLE001
-                    log.error("alert_insert: %s", e)
-                if notify:
-                    notify_desktop(
-                        "Signal Scanner",
-                        f"{srow.name} — {sym} triggered",
+                    log.debug("history %s: %s", sym, e)
+                    continue
+                if df is None or df.empty:
+                    continue
+                try:
+                    trig, det = evaluate(asig, df)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("eval %s: %s", sym, e)
+                    continue
+                if trig:
+                    result["fired"] += 1
+                    result["alerts"].append(
+                        {
+                            "user_id": user_id,
+                            "signal_id": srow.id,
+                            "name": srow.name,
+                            "symbol": sym,
+                            "details": det,
+                        }
                     )
+                    try:
+                        store.alert_insert(user_id, srow.id, sym, det)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("alert_insert: %s", e)
+                    if notify:
+                        notify_desktop(
+                            "Signal Scanner",
+                            f"{srow.name} — {sym} triggered",
+                        )
     return result
 
 

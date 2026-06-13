@@ -1,4 +1,4 @@
-"""SQLite persistence for watchlist, signals, and alerts."""
+"""SQLite persistence for user-scoped watchlists, signals, alerts, and scan jobs."""
 
 from __future__ import annotations
 
@@ -11,12 +11,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+DEFAULT_USER_ID = "local_admin"
+
 
 @dataclass
 class WatchlistRow:
     id: int
     symbol: str
     added_at: str
+    user_id: str = DEFAULT_USER_ID
 
 
 @dataclass
@@ -32,6 +35,7 @@ class SignalRow:
     created_at: str
     history_period: str = "1y"
     interval: str = "1d"
+    user_id: str = DEFAULT_USER_ID
 
 
 @dataclass
@@ -41,6 +45,7 @@ class AlertRow:
     symbol: str
     triggered_at: str
     details: dict[str, Any]
+    user_id: str = DEFAULT_USER_ID
 
 
 @dataclass
@@ -59,6 +64,7 @@ class ScanJobRow:
     cancel_requested: bool
     result: dict[str, Any] | None
     error: str | None
+    user_id: str = DEFAULT_USER_ID
 
 
 def _default_db_path() -> Path:
@@ -69,7 +75,7 @@ def _default_db_path() -> Path:
 
 
 class Store:
-    """Thread-safe SQLite store for watchlists, signals, and alert history."""
+    """Thread-safe SQLite store for user-scoped persistence."""
 
     def __init__(self, path: Path | str | None = None) -> None:
         self._path = Path(path) if path else _default_db_path()
@@ -82,6 +88,7 @@ class Store:
         with self._lock:
             c = sqlite3.connect(self._path)
             c.row_factory = sqlite3.Row
+            c.execute("PRAGMA foreign_keys = ON")
             try:
                 yield c
                 c.commit()
@@ -95,11 +102,15 @@ class Store:
                 """
                 CREATE TABLE IF NOT EXISTS watchlist (
                     id INTEGER PRIMARY KEY,
-                    symbol TEXT UNIQUE NOT NULL,
-                    added_at TEXT NOT NULL
+                    user_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    UNIQUE (user_id, symbol)
                 );
+
                 CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     signal_type TEXT NOT NULL,
                     params TEXT NOT NULL,
@@ -109,19 +120,23 @@ class Store:
                     history_period TEXT NOT NULL DEFAULT '1y',
                     interval TEXT NOT NULL DEFAULT '1d',
                     enabled INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    UNIQUE (id, user_id)
                 );
+
                 CREATE TABLE IF NOT EXISTS alerts (
                     id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
                     signal_id INTEGER NOT NULL,
                     symbol TEXT NOT NULL,
                     triggered_at TEXT NOT NULL,
                     details TEXT,
-                    FOREIGN KEY (signal_id) REFERENCES signals (id) ON DELETE CASCADE
+                    FOREIGN KEY (signal_id, user_id) REFERENCES signals (id, user_id) ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts (triggered_at DESC);
+
                 CREATE TABLE IF NOT EXISTS scan_jobs (
                     id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
                     job_type TEXT NOT NULL,
                     status TEXT NOT NULL,
                     params TEXT NOT NULL,
@@ -136,45 +151,186 @@ class Store:
                     result_json TEXT,
                     error TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_scan_jobs_requested_time ON scan_jobs (requested_at DESC);
                 """
             )
-            self._migrate_signals_columns(c)
+            self._migrate_legacy_schema(c)
+            c.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_watchlist_user_symbol ON watchlist (user_id, symbol);
+                CREATE INDEX IF NOT EXISTS idx_signals_user_created ON signals (user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_user_time ON alerts (user_id, triggered_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_scan_jobs_user_requested_time ON scan_jobs (user_id, requested_at DESC);
+                """
+            )
 
-    def _migrate_signals_columns(self, conn: sqlite3.Connection) -> None:
-        """Add newer signal columns and backfill sane defaults for legacy rows."""
-        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(signals)")}
-        if "ticker_scope" not in cols:
-            conn.execute(
-                "ALTER TABLE signals ADD COLUMN ticker_scope TEXT NOT NULL DEFAULT 'watchlist'",
-            )
-            conn.execute("ALTER TABLE signals ADD COLUMN exchange TEXT")
-            for row in conn.execute("SELECT id, ticker_overrides FROM signals").fetchall():
-                rid = int(row[0])
-                ov = row[1]
-                if ov:
-                    conn.execute(
-                        "UPDATE signals SET ticker_scope = 'tickers' WHERE id = ?",
-                        (rid,),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE signals SET ticker_scope = 'watchlist' WHERE id = ?",
-                        (rid,),
-                    )
-        if "history_period" not in cols:
-            conn.execute(
-                "ALTER TABLE signals ADD COLUMN history_period TEXT NOT NULL DEFAULT '1y'",
-            )
-        if "interval" not in cols:
-            conn.execute(
-                "ALTER TABLE signals ADD COLUMN interval TEXT NOT NULL DEFAULT '1d'",
-            )
+    def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
+        """Upgrade older single-user tables to the current user-scoped schema."""
+        self._ensure_user_scoped_table(
+            conn,
+            table_name="watchlist",
+            create_sql="""
+                CREATE TABLE watchlist (
+                    id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    UNIQUE (user_id, symbol)
+                )
+            """,
+            copy_sql="""
+                INSERT INTO watchlist (id, user_id, symbol, added_at)
+                SELECT id, ?, symbol, added_at FROM watchlist_legacy
+            """,
+        )
+        self._ensure_user_scoped_table(
+            conn,
+            table_name="signals",
+            create_sql="""
+                CREATE TABLE signals (
+                    id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    signal_type TEXT NOT NULL,
+                    params TEXT NOT NULL,
+                    ticker_overrides TEXT,
+                    ticker_scope TEXT NOT NULL DEFAULT 'watchlist',
+                    exchange TEXT,
+                    history_period TEXT NOT NULL DEFAULT '1y',
+                    interval TEXT NOT NULL DEFAULT '1d',
+                    enabled INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (id, user_id)
+                )
+            """,
+            copy_sql="""
+                INSERT INTO signals (
+                    id, user_id, name, signal_type, params, ticker_overrides,
+                    ticker_scope, exchange, history_period, interval, enabled, created_at
+                )
+                SELECT
+                    id,
+                    ?,
+                    name,
+                    signal_type,
+                    params,
+                    ticker_overrides,
+                    COALESCE(ticker_scope, CASE WHEN ticker_overrides IS NULL OR ticker_overrides = '' THEN 'watchlist' ELSE 'tickers' END),
+                    exchange,
+                    COALESCE(history_period, '1y'),
+                    COALESCE(interval, '1d'),
+                    COALESCE(enabled, 1),
+                    created_at
+                FROM signals_legacy
+            """,
+        )
+        self._ensure_user_scoped_table(
+            conn,
+            table_name="alerts",
+            create_sql="""
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    signal_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    triggered_at TEXT NOT NULL,
+                    details TEXT,
+                    FOREIGN KEY (signal_id, user_id) REFERENCES signals (id, user_id) ON DELETE CASCADE
+                )
+            """,
+            copy_sql="""
+                INSERT INTO alerts (id, user_id, signal_id, symbol, triggered_at, details)
+                SELECT id, ?, signal_id, symbol, triggered_at, details FROM alerts_legacy
+            """,
+        )
+        self._ensure_user_scoped_table(
+            conn,
+            table_name="scan_jobs",
+            create_sql="""
+                CREATE TABLE scan_jobs (
+                    id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    job_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    params TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    checked_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER,
+                    fired_count INTEGER NOT NULL DEFAULT 0,
+                    result_count INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    result_json TEXT,
+                    error TEXT
+                )
+            """,
+            copy_sql="""
+                INSERT INTO scan_jobs (
+                    id, user_id, job_type, status, params, requested_at, started_at, finished_at,
+                    checked_count, total_count, fired_count, result_count, cancel_requested, result_json, error
+                )
+                SELECT
+                    id,
+                    ?,
+                    job_type,
+                    status,
+                    params,
+                    requested_at,
+                    started_at,
+                    finished_at,
+                    COALESCE(checked_count, 0),
+                    total_count,
+                    COALESCE(fired_count, 0),
+                    COALESCE(result_count, 0),
+                    COALESCE(cancel_requested, 0),
+                    result_json,
+                    error
+                FROM scan_jobs_legacy
+            """,
+        )
+
+    def _ensure_user_scoped_table(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        create_sql: str,
+        copy_sql: str,
+    ) -> None:
+        cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name})")}
+        if "user_id" in cols:
+            return
+        conn.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_legacy")
+        conn.execute(create_sql)
+        conn.execute(copy_sql, (DEFAULT_USER_ID,))
+        conn.execute(f"DROP TABLE {table_name}_legacy")
+
+    def all_user_ids(self) -> list[str]:
+        """Return distinct user ids seen in any persisted user-owned table."""
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT DISTINCT user_id FROM (
+                    SELECT user_id FROM watchlist
+                    UNION ALL
+                    SELECT user_id FROM signals
+                    UNION ALL
+                    SELECT user_id FROM alerts
+                    UNION ALL
+                    SELECT user_id FROM scan_jobs
+                )
+                WHERE user_id IS NOT NULL AND user_id <> ''
+                ORDER BY user_id
+                """
+            ).fetchall()
+        values = [str(row[0]) for row in rows]
+        return values or [DEFAULT_USER_ID]
 
     # watchlist
-    def watchlist_add(self, symbols: Sequence[str]) -> list[str]:
+    def watchlist_add(self, user_id: str, symbols: Sequence[str]) -> list[str]:
         """Insert uppercase watchlist symbols and return only newly added ones."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         added: list[str] = []
         with self._conn() as c:
             for sym in symbols:
@@ -182,32 +338,41 @@ class Store:
                 if not s:
                     continue
                 c.execute(
-                    "INSERT OR IGNORE INTO watchlist (symbol, added_at) VALUES (?, ?)",
-                    (s, now),
+                    "INSERT OR IGNORE INTO watchlist (user_id, symbol, added_at) VALUES (?, ?, ?)",
+                    (user_id, s, now),
                 )
                 n = c.execute("SELECT changes()").fetchone()[0]
                 if n:
                     added.append(s)
         return added
 
-    def watchlist_remove(self, symbols: Sequence[str]) -> int:
+    def watchlist_remove(self, user_id: str, symbols: Sequence[str]) -> int:
         """Remove watchlist symbols and return the number of deleted rows."""
+        user_id = _normalize_user_id(user_id)
         n = 0
         with self._conn() as c:
             for sym in symbols:
-                cur = c.execute("DELETE FROM watchlist WHERE symbol = ?", (sym.strip().upper(),))
+                cur = c.execute(
+                    "DELETE FROM watchlist WHERE user_id = ? AND symbol = ?",
+                    (user_id, sym.strip().upper()),
+                )
                 n += cur.rowcount or 0
         return n
 
-    def watchlist_get(self) -> list[WatchlistRow]:
+    def watchlist_get(self, user_id: str) -> list[WatchlistRow]:
         """Return the current watchlist sorted by symbol."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            rows = c.execute("SELECT id, symbol, added_at FROM watchlist ORDER BY symbol")
-            return [WatchlistRow(int(r[0]), r[1], r[2]) for r in rows]
+            rows = c.execute(
+                "SELECT id, user_id, symbol, added_at FROM watchlist WHERE user_id = ? ORDER BY symbol",
+                (user_id,),
+            )
+            return [WatchlistRow(int(r["id"]), str(r["symbol"]), str(r["added_at"]), str(r["user_id"])) for r in rows]
 
     # signals
     def signal_create(
         self,
+        user_id: str,
         name: str,
         signal_type: str,
         params: dict[str, Any],
@@ -219,16 +384,18 @@ class Store:
     ) -> int:
         """Persist an enabled signal and return its database ID."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             c.execute(
                 """
                 INSERT INTO signals (
-                    name, signal_type, params, ticker_overrides,
+                    user_id, name, signal_type, params, ticker_overrides,
                     ticker_scope, exchange, history_period, interval, enabled, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
+                    user_id,
                     name,
                     signal_type,
                     json.dumps(params),
@@ -242,101 +409,127 @@ class Store:
             )
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    def signal_list(self) -> list[SignalRow]:
-        """Return all configured signals ordered by ID."""
+    def signal_list(self, user_id: str) -> list[SignalRow]:
+        """Return configured signals for one user ordered by ID."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            rows = c.execute("SELECT * FROM signals ORDER BY id")
+            rows = c.execute("SELECT * FROM signals WHERE user_id = ? ORDER BY id", (user_id,))
             return [_row_to_signal(r) for r in rows]
 
-    def signal_get(self, signal_id: int) -> SignalRow | None:
-        """Return one signal by ID, or None if it does not exist."""
+    def signal_get(self, user_id: str, signal_id: int) -> SignalRow | None:
+        """Return one user-owned signal by ID, or None if it does not exist."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            r = c.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
+            r = c.execute(
+                "SELECT * FROM signals WHERE user_id = ? AND id = ?",
+                (user_id, signal_id),
+            ).fetchone()
             return _row_to_signal(r) if r else None
 
-    def signal_delete(self, signal_id: int) -> bool:
-        """Delete a signal and its alert history; return whether it existed."""
+    def signal_delete(self, user_id: str, signal_id: int) -> bool:
+        """Delete a user-owned signal and its alert history; return whether it existed."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            c.execute("DELETE FROM alerts WHERE signal_id = ?", (signal_id,))
-            cur = c.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+            c.execute("DELETE FROM alerts WHERE user_id = ? AND signal_id = ?", (user_id, signal_id))
+            cur = c.execute("DELETE FROM signals WHERE user_id = ? AND id = ?", (user_id, signal_id))
             return (cur.rowcount or 0) > 0
 
-    def signal_set_enabled(self, signal_id: int, enabled: bool) -> bool:
-        """Enable or disable a signal by ID; return whether it existed."""
+    def signal_set_enabled(self, user_id: str, signal_id: int, enabled: bool) -> bool:
+        """Enable or disable one user-owned signal by ID."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            cur = c.execute("UPDATE signals SET enabled = ? WHERE id = ?", (1 if enabled else 0, signal_id))
+            cur = c.execute(
+                "UPDATE signals SET enabled = ? WHERE user_id = ? AND id = ?",
+                (1 if enabled else 0, user_id, signal_id),
+            )
             return (cur.rowcount or 0) > 0
 
     # alerts
     def alert_insert(
         self,
+        user_id: str,
         signal_id: int,
         symbol: str,
         details: dict[str, Any],
     ) -> int:
         """Persist one triggered alert and return its database ID."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
+            if not c.execute(
+                "SELECT id FROM signals WHERE id = ? AND user_id = ?",
+                (signal_id, user_id),
+            ).fetchone():
+                raise ValueError(f"signal {signal_id} not found for user {user_id!r}")
             c.execute(
-                "INSERT INTO alerts (signal_id, symbol, triggered_at, details) VALUES (?, ?, ?, ?)",
-                (signal_id, symbol.upper(), now, json.dumps(details)),
+                "INSERT INTO alerts (user_id, signal_id, symbol, triggered_at, details) VALUES (?, ?, ?, ?, ?)",
+                (user_id, signal_id, symbol.upper(), now, json.dumps(details)),
             )
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    def alerts_recent(self, limit: int = 50) -> list[AlertRow]:
-        """Return the newest alert rows, newest first."""
+    def alerts_recent(self, user_id: str, limit: int = 50) -> list[AlertRow]:
+        """Return one user's newest alert rows, newest first."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM alerts WHERE user_id = ? ORDER BY triggered_at DESC LIMIT ?",
+                (user_id, limit),
             )
             return [_row_to_alert(r) for r in rows]
 
     # scan jobs
-    def scan_job_create(self, job_type: str, params: dict[str, Any]) -> int:
+    def scan_job_create(self, user_id: str, job_type: str, params: dict[str, Any]) -> int:
         """Create a queued scan job and return its ID."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             c.execute(
                 """
-                INSERT INTO scan_jobs (job_type, status, params, requested_at)
-                VALUES (?, 'queued', ?, ?)
+                INSERT INTO scan_jobs (user_id, job_type, status, params, requested_at)
+                VALUES (?, ?, 'queued', ?, ?)
                 """,
-                (job_type, json.dumps(params), now),
+                (user_id, job_type, json.dumps(params), now),
             )
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    def scan_job_get(self, job_id: int) -> ScanJobRow | None:
-        """Return one scan job by ID, or None if missing."""
+    def scan_job_get(self, user_id: str, job_id: int) -> ScanJobRow | None:
+        """Return one user-owned scan job by ID, or None if missing."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            row = c.execute("SELECT * FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = c.execute(
+                "SELECT * FROM scan_jobs WHERE user_id = ? AND id = ?",
+                (user_id, job_id),
+            ).fetchone()
             return _row_to_scan_job(row) if row else None
 
-    def scan_jobs_recent(self, limit: int = 20) -> list[ScanJobRow]:
-        """Return recent scan jobs, newest first."""
+    def scan_jobs_recent(self, user_id: str, limit: int = 20) -> list[ScanJobRow]:
+        """Return one user's recent scan jobs, newest first."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM scan_jobs ORDER BY requested_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM scan_jobs WHERE user_id = ? ORDER BY requested_at DESC LIMIT ?",
+                (user_id, limit),
             )
             return [_row_to_scan_job(r) for r in rows]
 
-    def scan_job_mark_running(self, job_id: int, *, total_count: int | None = None) -> bool:
+    def scan_job_mark_running(self, user_id: str, job_id: int, *, total_count: int | None = None) -> bool:
         """Transition a queued job to running unless it was already cancelled."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             cur = c.execute(
                 """
                 UPDATE scan_jobs
                 SET status = 'running', started_at = ?, total_count = COALESCE(?, total_count)
-                WHERE id = ? AND status = 'queued' AND cancel_requested = 0
+                WHERE user_id = ? AND id = ? AND status = 'queued' AND cancel_requested = 0
                 """,
-                (now, total_count, job_id),
+                (now, total_count, user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
     def scan_job_update_progress(
         self,
+        user_id: str,
         job_id: int,
         *,
         checked_count: int,
@@ -345,20 +538,22 @@ class Store:
         total_count: int | None = None,
     ) -> bool:
         """Persist running job progress counters."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             cur = c.execute(
                 """
                 UPDATE scan_jobs
                 SET checked_count = ?, fired_count = ?, result_count = ?, total_count = COALESCE(?, total_count)
-                WHERE id = ? AND status = 'running'
+                WHERE user_id = ? AND id = ? AND status = 'running'
                 """,
-                (checked_count, fired_count, result_count, total_count, job_id),
+                (checked_count, fired_count, result_count, total_count, user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
-    def scan_job_complete(self, job_id: int, result: dict[str, Any]) -> bool:
+    def scan_job_complete(self, user_id: str, job_id: int, result: dict[str, Any]) -> bool:
         """Mark a job completed and persist its final result payload."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         checked_count = int(result.get("checked_count", 0))
         total_count = result.get("total_count")
         fired_count = int(result.get("triggered_count", result.get("fired_count", result.get("count", 0))))
@@ -375,47 +570,54 @@ class Store:
                     result_count = ?,
                     result_json = ?,
                     error = NULL
-                WHERE id = ?
+                WHERE user_id = ? AND id = ?
                 """,
-                (now, checked_count, total_count, fired_count, result_count, json.dumps(result), job_id),
+                (now, checked_count, total_count, fired_count, result_count, json.dumps(result), user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
-    def scan_job_fail(self, job_id: int, error: str) -> bool:
+    def scan_job_fail(self, user_id: str, job_id: int, error: str) -> bool:
         """Mark a job failed and store the error string."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             cur = c.execute(
                 """
                 UPDATE scan_jobs
                 SET status = 'failed', finished_at = ?, error = ?
-                WHERE id = ? AND status IN ('queued', 'running')
+                WHERE user_id = ? AND id = ? AND status IN ('queued', 'running')
                 """,
-                (now, error, job_id),
+                (now, error, user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
-    def scan_job_request_cancel(self, job_id: int) -> bool:
+    def scan_job_request_cancel(self, user_id: str, job_id: int) -> bool:
         """Request cancellation for a queued or running job."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             cur = c.execute(
                 """
                 UPDATE scan_jobs
                 SET cancel_requested = 1
-                WHERE id = ? AND status IN ('queued', 'running')
+                WHERE user_id = ? AND id = ? AND status IN ('queued', 'running')
                 """,
-                (job_id,),
+                (user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
-    def scan_job_is_cancel_requested(self, job_id: int) -> bool:
-        """Return whether cancellation has been requested for a job."""
+    def scan_job_is_cancel_requested(self, user_id: str, job_id: int) -> bool:
+        """Return whether cancellation has been requested for a user-owned job."""
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
-            row = c.execute("SELECT cancel_requested FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = c.execute(
+                "SELECT cancel_requested FROM scan_jobs WHERE user_id = ? AND id = ?",
+                (user_id, job_id),
+            ).fetchone()
             return bool(row[0]) if row else False
 
     def scan_job_mark_cancelled(
         self,
+        user_id: str,
         job_id: int,
         *,
         checked_count: int,
@@ -423,8 +625,9 @@ class Store:
         result_count: int,
         total_count: int | None = None,
     ) -> bool:
-        """Mark a job cancelled with the latest progress counters."""
+        """Mark a user-owned job cancelled with the latest progress counters."""
         now = _utc_now()
+        user_id = _normalize_user_id(user_id)
         with self._conn() as c:
             cur = c.execute(
                 """
@@ -436,9 +639,9 @@ class Store:
                     fired_count = ?,
                     result_count = ?,
                     error = NULL
-                WHERE id = ? AND status IN ('queued', 'running')
+                WHERE user_id = ? AND id = ? AND status IN ('queued', 'running')
                 """,
-                (now, checked_count, total_count, fired_count, result_count, job_id),
+                (now, checked_count, total_count, fired_count, result_count, user_id, job_id),
             )
             return (cur.rowcount or 0) > 0
 
@@ -446,26 +649,20 @@ class Store:
 def _row_to_signal(r: sqlite3.Row) -> SignalRow:
     """Convert a SQLite signal row into a typed dataclass."""
     ov = r["ticker_overrides"]
-    keys = r.keys()
-    scope = str(r["ticker_scope"]) if "ticker_scope" in keys else "watchlist"
-    ex = r["exchange"] if "exchange" in keys else None
-    history_period = str(r["history_period"]).strip().lower() if "history_period" in keys and r["history_period"] else "1y"
-    interval = str(r["interval"]).strip().lower() if "interval" in keys and r["interval"] else "1d"
     ov_list = json.loads(ov) if ov else None
-    if "ticker_scope" not in keys:
-        scope = "tickers" if ov_list else "watchlist"
     return SignalRow(
         id=int(r["id"]),
         name=str(r["name"]),
         signal_type=str(r["signal_type"]),
         params=json.loads(r["params"]),
         ticker_overrides=ov_list,
-        ticker_scope=scope,
-        exchange=str(ex).strip().upper() if ex else None,
+        ticker_scope=str(r["ticker_scope"]),
+        exchange=str(r["exchange"]).strip().upper() if r["exchange"] else None,
         enabled=bool(r["enabled"]),
         created_at=str(r["created_at"]),
-        history_period=history_period,
-        interval=interval,
+        history_period=str(r["history_period"]).strip().lower() if r["history_period"] else "1y",
+        interval=str(r["interval"]).strip().lower() if r["interval"] else "1d",
+        user_id=str(r["user_id"]),
     )
 
 
@@ -478,6 +675,7 @@ def _row_to_alert(r: sqlite3.Row) -> AlertRow:
         symbol=str(r["symbol"]),
         triggered_at=str(r["triggered_at"]),
         details=json.loads(d) if d else {},
+        user_id=str(r["user_id"]),
     )
 
 
@@ -499,7 +697,13 @@ def _row_to_scan_job(r: sqlite3.Row) -> ScanJobRow:
         cancel_requested=bool(r["cancel_requested"]),
         result=json.loads(payload) if payload else None,
         error=str(r["error"]) if r["error"] else None,
+        user_id=str(r["user_id"]),
     )
+
+
+def _normalize_user_id(user_id: str | None) -> str:
+    value = str(user_id or DEFAULT_USER_ID).strip()
+    return value or DEFAULT_USER_ID
 
 
 def _utc_now() -> str:

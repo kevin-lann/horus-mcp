@@ -201,17 +201,17 @@ class ServerHelpersTest(unittest.TestCase):
 
     def test_create_signal_validates_scope_arguments_and_persists(self) -> None:
         class FakeStore:
-            def signal_create(self, name, signal_type, params, ticker_overrides, ticker_scope, exchange):  # noqa: ANN001
-                self.args = (name, signal_type, params, ticker_overrides, ticker_scope, exchange)
+            def signal_create(self, user_id, name, signal_type, params, ticker_overrides, ticker_scope, exchange):  # noqa: ANN001
+                self.args = (user_id, name, signal_type, params, ticker_overrides, ticker_scope, exchange)
                 return 42
 
         fake_store = FakeStore()
-        ok = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", {"threshold": 35}, "tickers", ["spy"], None))
-        bad = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", None, "watchlist", ["spy"], None))
-        ex_bad = json.loads(signals_service.create_signal_payload(fake_store, "Name", "rsi_oversold", None, "exchange", None, "BAD"))
+        ok = json.loads(signals_service.create_signal_payload(fake_store, "user-a", "Name", "rsi_oversold", {"threshold": 35}, "tickers", ["spy"], None))
+        bad = json.loads(signals_service.create_signal_payload(fake_store, "user-a", "Name", "rsi_oversold", None, "watchlist", ["spy"], None))
+        ex_bad = json.loads(signals_service.create_signal_payload(fake_store, "user-a", "Name", "rsi_oversold", None, "exchange", None, "BAD"))
 
         self.assertEqual(ok["id"], 42)
-        self.assertEqual(fake_store.args, ("Name", "rsi_oversold", {"threshold": 35}, ["SPY"], "tickers", None))
+        self.assertEqual(fake_store.args, ("user-a", "Name", "rsi_oversold", {"threshold": 35}, ["SPY"], "tickers", None))
         self.assertIn("omit ticker_overrides", bad["error"])
         self.assertEqual(ex_bad["error"], "invalid exchange: BAD; use NYSE, NASDAQ, AMEX, or CRYPTO")
 
@@ -223,6 +223,7 @@ class ServerHelpersTest(unittest.TestCase):
         payload = json.loads(
             signals_service.create_signal_payload(
                 FakeStore(),
+                "user-a",
                 "Intraday RSI",
                 "rsi_oversold",
                 None,
@@ -249,10 +250,10 @@ class ServerHelpersTest(unittest.TestCase):
 
     def test_run_scan_payload_records_persisted_history_fetch_errors(self) -> None:
         class FakeStore:
-            def watchlist_get(self):  # noqa: ANN001
+            def watchlist_get(self, _user_id):  # noqa: ANN001
                 return []
 
-            def signal_list(self):  # noqa: ANN001
+            def signal_list(self, _user_id):  # noqa: ANN001
                 return [
                     type(
                         "SignalRow",
@@ -274,7 +275,7 @@ class ServerHelpersTest(unittest.TestCase):
             def get_history(self, _ticker: str, *, period: str, interval: str):  # noqa: ANN001
                 raise RuntimeError("fetch failed")
 
-        payload = json.loads(signals_service.run_scan_payload(FakeStore(), ExplodingProvider()))
+        payload = json.loads(signals_service.run_scan_payload(FakeStore(), ExplodingProvider(), "user-a"))
 
         self.assertEqual(payload["results"], [])
         self.assertEqual(payload["count"], 0)
@@ -282,10 +283,10 @@ class ServerHelpersTest(unittest.TestCase):
 
     def test_run_scan_payload_records_persisted_empty_history_errors(self) -> None:
         class FakeStore:
-            def watchlist_get(self):  # noqa: ANN001
+            def watchlist_get(self, _user_id):  # noqa: ANN001
                 return []
 
-            def signal_list(self):  # noqa: ANN001
+            def signal_list(self, _user_id):  # noqa: ANN001
                 return [
                     type(
                         "SignalRow",
@@ -307,7 +308,7 @@ class ServerHelpersTest(unittest.TestCase):
             def get_history(self, _ticker: str, *, period: str, interval: str):  # noqa: ANN001
                 return pd.DataFrame()
 
-        payload = json.loads(signals_service.run_scan_payload(FakeStore(), EmptyProvider()))
+        payload = json.loads(signals_service.run_scan_payload(FakeStore(), EmptyProvider(), "user-a"))
 
         self.assertEqual(payload["results"], [])
         self.assertEqual(payload["count"], 0)

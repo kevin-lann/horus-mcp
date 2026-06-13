@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
 from scanner_mcp.data.provider import DataProvider
-from scanner_mcp.db.store import SignalRow, Store
+from scanner_mcp.db.store import DEFAULT_USER_ID, SignalRow, Store
 from scanner_mcp.signals.catalog import CATALOG, merge_params
 from scanner_mcp.signals.evaluator import evaluate
 from scanner_mcp.signals.models import ActiveSignal
@@ -136,6 +136,7 @@ def validate_signal_creation(
 
 def create_signal_payload(
     store: Store,
+    user_id: str,
     name: str,
     signal_type: str,
     params: dict[str, Any] | None,
@@ -151,6 +152,7 @@ def create_signal_payload(
         return json.dumps(validated)
     try:
         signal_id = store.signal_create(
+            user_id,
             validated["name"],
             validated["signal_type"],
             validated["params"],
@@ -164,6 +166,7 @@ def create_signal_payload(
         # Backward compatibility for older test doubles or stores that still expose
         # the pre-timeframe signal_create signature.
         signal_id = store.signal_create(
+            user_id,
             validated["name"],
             validated["signal_type"],
             validated["params"],
@@ -211,10 +214,11 @@ def _resolve_scan_tickers(
 
 def _count_scan_work_items(
     store: Store,
+    user_id: str,
     signal_rows: list[SignalRow],
     tick_list: list[str] | None,
 ) -> int:
-    watch_symbols = [row.symbol for row in store.watchlist_get()]
+    watch_symbols = [row.symbol for row in store.watchlist_get(user_id)]
     total = 0
     for signal_row in signal_rows:
         universe = tick_list if tick_list is not None else resolve_signal_universe(signal_row, watch_symbols)
@@ -224,6 +228,7 @@ def _count_scan_work_items(
 def execute_scan(
     store: Store,
     provider: DataProvider,
+    user_id: str = DEFAULT_USER_ID,
     signal_id: int | None = None,
     tickers: list[str] | None = None,
     all_signal_types: bool = False,
@@ -313,13 +318,13 @@ def execute_scan(
 
     results: list[dict[str, Any]] = []
     ticker_errors: list[dict[str, Any]] = []
-    watch_symbols = [row.symbol for row in store.watchlist_get()]
-    signal_rows = store.signal_list()
+    watch_symbols = [row.symbol for row in store.watchlist_get(user_id)]
+    signal_rows = store.signal_list(user_id)
     if signal_id is not None:
         signal_rows = [row for row in signal_rows if row.id == signal_id and row.enabled]
     else:
         signal_rows = [row for row in signal_rows if row.enabled]
-    total_count = _count_scan_work_items(store, signal_rows, tick_list)
+    total_count = _count_scan_work_items(store, user_id, signal_rows, tick_list)
     checked_count = 0
     fired_count = 0
     for signal_row in signal_rows:
@@ -384,6 +389,7 @@ def execute_scan(
 def run_scan_payload(
     store: Store,
     provider: DataProvider,
+    user_id: str = DEFAULT_USER_ID,
     signal_id: int | None = None,
     tickers: list[str] | None = None,
     all_signal_types: bool = False,
@@ -395,6 +401,7 @@ def run_scan_payload(
         payload = execute_scan(
             store,
             provider,
+            user_id=user_id,
             signal_id=signal_id,
             tickers=tickers,
             all_signal_types=all_signal_types,
