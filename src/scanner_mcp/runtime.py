@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 
 from apscheduler.schedulers.base import BaseScheduler
 from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_access_token, get_http_request
 
 from scanner_mcp.data.provider import CompositeDataProvider, DataProvider
 from scanner_mcp.db.store import DEFAULT_USER_ID, Store
@@ -24,6 +25,7 @@ _provider: DataProvider | None = None
 _sched: BaseScheduler | None = None
 _scan_executor: ThreadPoolExecutor | None = None
 _scan_futures: dict[int, Future[None]] = {}
+TRANSPORT_USER_ID_HEADER = "x-scanner-user-id"
 
 
 def shutdown_scheduler() -> None:
@@ -69,6 +71,29 @@ def get_provider() -> DataProvider:
     if _provider is None:
         _provider = CompositeDataProvider.default()
     return _provider
+
+
+def get_request_user_id() -> str:
+    """Resolve the authenticated tenant from FastMCP auth or transport headers."""
+    access_token = get_access_token()
+    if access_token is not None:
+        for claim_name in ("sub", "user_id"):
+            claim_value = access_token.claims.get(claim_name)
+            if str(claim_value or "").strip():
+                return str(claim_value).strip()
+
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        request = None
+
+    if request is not None:
+        header_value = request.headers.get(TRANSPORT_USER_ID_HEADER, "").strip()
+        if header_value:
+            return header_value
+
+    return DEFAULT_USER_ID
+
 
 def scan_job_payload(job_id: int, user_id: str = DEFAULT_USER_ID) -> dict[str, Any]:
     row = get_store().scan_job_get(user_id, job_id)
