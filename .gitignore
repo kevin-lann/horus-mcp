@@ -11,7 +11,7 @@ build/
 .coverage
 htmlcov/
 ~/.scanner_mcp/
-docs/
+docs/tmp/
 output/
 .DS_Store
 .env
