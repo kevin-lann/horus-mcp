@@ -41,7 +41,7 @@ from scanner_mcp.signals.service import create_signal_payload, run_scan_payload
 
 log = logging.getLogger(__name__)
 
-mcp = FastMCP("ScannerMCP", lifespan=lifespan)
+mcp = FastMCP("HorusMCP", lifespan=lifespan)
 
 
 @mcp.tool()
