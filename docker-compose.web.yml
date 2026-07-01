@@ -13,7 +13,7 @@ services:
 
   backend:
     build:
-      context: ../scanner-web-backend
+      context: ../horus-scanner-server
     depends_on:
       - mcp-server
     environment:
@@ -27,7 +27,7 @@ services:
 
   frontend:
     build:
-      context: ../scanner-web-frontend
+      context: ../horus-scanner-frontend
       dockerfile: Dockerfile
     depends_on:
       - backend

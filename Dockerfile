@@ -18,4 +18,4 @@ RUN chown -R appuser:appgroup /app
 RUN mkdir -p /data && chown -R appuser:appgroup /data
 USER appuser
 
-CMD ["scanner-mcp-http"]
+CMD ["horus-mcp-http"]
