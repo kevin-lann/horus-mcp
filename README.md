@@ -1,6 +1,6 @@
-# scanner-mcp
+# horus-mcp
 
-`scanner-mcp` is an MCP server for stock and crypto market research. It provides price lookups, technical indicators, signal scanning, watchlists, research resources, and PNG chart tools that work in MCP clients such as Claude Desktop, Cursor, and Codex.
+`horus-mcp` is an MCP server for stock and crypto market research. It provides price lookups, technical indicators, signal scanning, watchlists, research resources, and PNG chart tools that work in MCP clients such as Claude Desktop, Cursor, and Codex.
 
 Data comes primarily from `yfinance`, with SQLite persistence for saved signals, watchlists, alerts, and background scan jobs.
 

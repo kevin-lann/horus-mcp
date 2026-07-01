@@ -41,7 +41,7 @@ from scanner_mcp.signals.service import create_signal_payload, run_scan_payload
 
 log = logging.getLogger(__name__)
 
-mcp = FastMCP("ScannerMCP", lifespan=lifespan)
+mcp = FastMCP("HorusMCP", lifespan=lifespan)
 
 
 @mcp.tool()
@@ -706,7 +706,7 @@ def resource_forward_returns(symbol: str, event_type: str) -> str:
 def main() -> None:
     """Configure logging and run the FastMCP stdio server."""
     configure_logging()
-    log.info("Starting ScannerMCP from %s", __file__)
+    log.info("Starting HorusMCP from %s", __file__)
     old_sigint, old_sigterm = install_signal_handlers()
     try:
         mcp.run()
@@ -722,7 +722,7 @@ def main_http() -> None:
     configure_logging()
     host = os.environ.get("SCANNER_MCP_HTTP_HOST", "0.0.0.0")
     port = int(os.environ.get("SCANNER_MCP_HTTP_PORT", "5050"))
-    log.info("Starting ScannerMCP HTTP server on %s:%s from %s", host, port, __file__)
+    log.info("Starting HorusMCP HTTP server on %s:%s from %s", host, port, __file__)
     old_sigint, old_sigterm = install_signal_handlers()
     try:
         mcp.run(transport="http", host=host, port=port)
