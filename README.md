@@ -27,21 +27,21 @@ Notes:
 ## Quick Setup
 
 ```bash
-cd /path/to/scanner-mcp
+cd /path/to/horus-mcp
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-scanner-mcp
+horus-mcp
 ```
 
 Windows PowerShell:
 
 ```powershell
-cd C:\path\to\scanner-mcp
+cd C:\path\to\horus-mcp
 py -3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
-scanner-mcp
+horus-mcp
 ```
 
 ## Step-By-Step Local Setup
@@ -60,13 +60,13 @@ Change into the project directory:
 macOS / Linux:
 
 ```bash
-cd ~/Projects/scanner-mcp
+cd ~/Projects/horus-mcp
 ```
 
 Windows PowerShell:
 
 ```powershell
-cd C:\Users\YourName\Projects\scanner-mcp
+cd C:\Users\YourName\Projects\horus-mcp
 ```
 
 ### 3. Create a virtual environment
@@ -111,14 +111,14 @@ Run:
 pip install -e .
 ```
 
-This installs the dependencies and the `scanner-mcp` command.
+This installs the dependencies and the `horus-mcp` command.
 
 ### 6. Start the server
 
 Run:
 
 ```bash
-scanner-mcp
+horus-mcp
 ```
 
 The server uses MCP `stdio` transport by default. Most MCP clients should launch this same command internally rather than having you run it manually in a separate terminal.
@@ -127,7 +127,7 @@ The server uses MCP `stdio` transport by default. Most MCP clients should launch
 
 ## Connecting an MCP Client
 
-Most clients need the full path to the installed `scanner-mcp` executable inside `.venv`.
+Most clients need the full path to the installed `horus-mcp` executable inside `.venv`.
 
 ### Claude Desktop
 
@@ -135,7 +135,7 @@ Most clients need the full path to the installed `scanner-mcp` executable inside
 2. Open the Claude Desktop MCP config file:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
    - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-3. Add a `scanner-mcp` server entry under `mcpServers`.
+3. Add a `horus-mcp` server entry under `mcpServers`.
 4. Restart Claude Desktop.
 
 Example config on macOS:
@@ -143,8 +143,8 @@ Example config on macOS:
 ```json
 {
   "mcpServers": {
-    "scanner-mcp": {
-      "command": "/Users/yourname/Projects/scanner-mcp/.venv/bin/scanner-mcp",
+    "horus-mcp": {
+      "command": "/Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp",
       "args": []
     }
   }
@@ -156,8 +156,8 @@ Example config on Windows:
 ```json
 {
   "mcpServers": {
-    "scanner-mcp": {
-      "command": "C:\\Users\\yourname\\Projects\\scanner-mcp\\.venv\\Scripts\\scanner-mcp.exe",
+    "horus-mcp": {
+      "command": "C:\\Users\\yourname\\Projects\\horus-mcp\\.venv\\Scripts\\horus-mcp.exe",
       "args": []
     }
   }
@@ -171,8 +171,8 @@ macOS / Linux:
 ```json
 {
   "mcpServers": {
-    "scanner-mcp": {
-      "command": "/Users/yourname/Projects/scanner-mcp/.venv/bin/python",
+    "horus-mcp": {
+      "command": "/Users/yourname/Projects/horus-mcp/.venv/bin/python",
       "args": ["-m", "scanner_mcp"]
     }
   }
@@ -184,8 +184,8 @@ Windows:
 ```json
 {
   "mcpServers": {
-    "scanner-mcp": {
-      "command": "C:\\Users\\yourname\\Projects\\scanner-mcp\\.venv\\Scripts\\python.exe",
+    "horus-mcp": {
+      "command": "C:\\Users\\yourname\\Projects\\horus-mcp\\.venv\\Scripts\\python.exe",
       "args": ["-m", "scanner_mcp"]
     }
   }
@@ -279,7 +279,7 @@ All chart tools return a PNG image on success.
 For interactive MCP debugging:
 
 ```bash
-npx @modelcontextprotocol/inspector scanner-mcp
+npx @modelcontextprotocol/inspector horus-mcp
 ```
 
 ### Unit Tests
