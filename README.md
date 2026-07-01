@@ -21,6 +21,7 @@
 - Run scans in the background and poll for status/results later
 - Generate PNG charts for price action, overlays, relative strength, fundamentals, forward returns, breadth, drawdowns, and more
 - Expose MCP resources for recent alerts, watchlist symbols, and forward-return research
+- Connect to your favorite client: Claude Desktop, Openclaw, Hermes etc. See specific setup instructions for popular clients [here](#connecting-an-mcp-client)
 
 ## Prerequisites
 
@@ -201,6 +202,78 @@ Windows:
 }
 ```
 
+### Cursor
+
+Cursor uses the same JSON format as Claude Desktop. Place it in `~/.cursor/mcp.json` (global, all projects) or `<project>/.cursor/mcp.json` (project-scoped). You can also add it via **Settings > Tools & MCP > New MCP Server**.
+
+```json
+{
+  "mcpServers": {
+    "horus-mcp": {
+      "command": "/Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+### Codex CLI
+
+Codex uses TOML, not JSON. Edit `~/.codex/config.toml` (or a project-scoped `.codex/config.toml`):
+
+```toml
+[mcp_servers.horus-mcp]
+command = "/Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp"
+args = []
+```
+
+Or add it from the CLI:
+
+```bash
+codex mcp add horus-mcp -- /Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp
+```
+
+### OpenClaw
+
+OpenClaw uses JSON but nests servers under `mcp.servers` (not `mcpServers`). Edit `~/.openclaw/openclaw.json` and restart OpenClaw:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "horus-mcp": {
+        "command": "/Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp",
+        "args": []
+      }
+    }
+  }
+}
+```
+
+### Hermes Agent
+
+Hermes uses YAML. Add the server under `mcp_servers` in your `config.yaml`:
+
+```yaml
+mcp_servers:
+  horus-mcp:
+    command: "/Users/yourname/Projects/horus-mcp/.venv/bin/horus-mcp"
+    args: []
+```
+
+### Python fallback (all clients)
+
+If any client cannot find the `horus-mcp` executable, point `command` at the venv's Python and run the module instead. For example, in JSON clients:
+
+```json
+{
+  "command": "/Users/yourname/Projects/horus-mcp/.venv/bin/python",
+  "args": ["-m", "scanner_mcp"]
+}
+```
+
+Adapt the same `command`/`args` pair to the TOML or YAML formats above. On Windows, use the `.venv\Scripts\` path and escape backslashes in JSON (`\\`).
+
 ## Configuration
 
 Optional environment variables:
@@ -281,80 +354,6 @@ All chart tools return a PNG image on success.
 | `signals://watchlist` | Current watchlist symbols as JSON. |
 | `research://forward-returns/{symbol}/{event_type}` | Markdown forward-return summary for a symbol and event type. |
 
-## Local Testing
-
-### MCP Inspector
-
-For interactive MCP debugging:
-
-```bash
-npx @modelcontextprotocol/inspector horus-mcp
-```
-
-### Unit Tests
-
-Run the test suite:
-
-```bash
-python3 -m pytest
-```
-
-### Smoke Testing Individual Tools
-
-The repo includes `test.py` for direct local testing without an MCP client:
-
-```bash
-source .venv/bin/activate
-python3 test.py --help
-```
-
-Examples:
-
-```bash
-python3 test.py --tool catalog
-python3 test.py --tool price --symbol SPY
-python3 test.py --tool indicators --symbol AAPL --period 6mo
-python3 test.py --tool options --symbol AAPL
-python3 test.py --tool snapshot
-python3 test.py --tool movers --exchange NASDAQ --limit 5
-python3 test.py --tool signals
-python3 test.py --tool chart --chart-type price_history --symbol SPY
-python3 test.py --tool chart --chart-type price_overlay --symbols SPY QQQ --period 6mo
-python3 test.py --tool all --symbol SPY
-```
-
-Examples that modify the local SQLite database:
-
-```bash
-python3 test.py --tool watchlist --mutate --symbols AAPL MSFT
-python3 test.py --tool create_signal --mutate --signal-name "debug rsi" --signal-type rsi_oversold --signal-params '{"threshold":100}' --signal-tickers --symbols AAPL MSFT
-python3 test.py --tool scan
-python3 test.py --tool scan --symbols AAPL MSFT
-python3 test.py --tool delete_signal --mutate --signal-id 1
-```
-
-## SQLite Database
-
-Open the default database from the command line:
-
-```bash
-sqlite3 ~/.scanner_mcp/data.db
-```
-
-Useful commands:
-
-- `.tables`
-- `.schema alerts`
-- `SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT 20;`
-- `SELECT * FROM signals;`
-- `SELECT * FROM watchlist;`
-- `.quit`
-
-One-shot query:
-
-```bash
-sqlite3 ~/.scanner_mcp/data.db "SELECT id, signal_id, symbol, triggered_at FROM alerts ORDER BY triggered_at DESC LIMIT 10;"
-```
 
 ## Disclaimer
 
