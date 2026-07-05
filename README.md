@@ -135,6 +135,14 @@ The server uses MCP `stdio` transport by default. Most MCP clients should launch
 
 </details>
 
+## MCP Inspector
+
+For interactive MCP debugging, first ensure the venv is activate with the above steps. Then run:
+
+```bash
+npx @modelcontextprotocol/inspector horus-mcp
+```
+
 ## Connecting an MCP Client
 
 Most clients need the full path to the installed `horus-mcp` executable inside `.venv`.

@@ -35,7 +35,7 @@ horus-mcp
 
 ### MCP Inspector
 
-For interactive MCP debugging:
+For interactive MCP debugging, first ensure the venv is activate with the above steps. Then run:
 
 ```bash
 npx @modelcontextprotocol/inspector horus-mcp
