@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from typing import Annotated, Any, Literal
 
@@ -14,6 +15,7 @@ from fastmcp.utilities.types import Image
 
 from scanner_mcp.charts.service import chart_tool_result
 from scanner_mcp.data.movers import screen_movers
+from scanner_mcp.data.provider import DataProvider
 from scanner_mcp.indicators.core import Indicators
 from scanner_mcp.market.service import (
     as_float,
@@ -110,6 +112,46 @@ def get_price(symbol: str) -> str:
         "market_cap": first_present(info, "market_cap", "marketCap"),
     }
     return json.dumps(payload, indent=2, default=str)
+
+
+def _fetch_quote(provider: DataProvider, symbol: str) -> dict[str, Any]:
+    info = provider.get_fast_info(symbol)
+    quote = quote_snapshot(provider, symbol)
+    if not info and quote["last_price"] is None:
+        return {"symbol": symbol.upper(), "error": "no data"}
+    last = quote["last_price"]
+    prev = quote["previous_close"]
+    day_change = as_float(first_present(info, "day_change", "dayChange")) if info else None
+    if day_change is None and last is not None and prev is not None:
+        day_change = last - prev
+    return {
+        "symbol": symbol.upper(),
+        "last_price": last,
+        "previous_close": prev,
+        "day_change": day_change,
+        "day_change_pct": quote["day_change_pct"],
+        "volume": first_present(info, "last_volume", "lastVolume", "shares_unlisted", "sharesUnlisted"),
+        "market_cap": first_present(info, "market_cap", "marketCap"),
+    }
+
+
+@mcp.tool()
+def get_quotes(symbols: list[str]) -> str:
+    """Batch version of `get_price` for multiple symbols in a single call — prefer this over looping `get_price`.
+
+    Fetches symbols concurrently (each is a blocking yfinance network call), so latency stays close to a single
+    symbol's fetch time instead of the sum across the whole list.
+
+    `symbols`: list of yfinance ticker strings (e.g. `["AAPL", "TSLA"]`).
+    Returns JSON text: array of `{symbol, last_price, previous_close, day_change, day_change_pct, volume, market_cap}`,
+    or `{symbol, error}` for any ticker with no data. Order matches the input `symbols` order.
+    """
+    provider = get_provider()
+    if not symbols:
+        return json.dumps([])
+    with ThreadPoolExecutor(max_workers=min(24, len(symbols))) as pool:
+        quotes = list(pool.map(lambda symbol: _fetch_quote(provider, symbol), symbols))
+    return json.dumps(quotes, indent=2, default=str)
 
 
 @mcp.tool()
@@ -441,6 +483,14 @@ def get_watchlist() -> str:
     """Return the current watchlist as a JSON array of ticker strings."""
     user_id = get_request_user_id()
     return json.dumps([row.symbol for row in get_store().watchlist_get(user_id)], indent=2)
+
+
+@mcp.tool()
+def get_watchlist_detail() -> str:
+    """Return the current watchlist with metadata (JSON array of `{symbol, added_at}`, sorted by symbol)."""
+    user_id = get_request_user_id()
+    rows = get_store().watchlist_get(user_id)
+    return json.dumps([{"symbol": row.symbol, "added_at": row.added_at} for row in rows], indent=2)
 
 
 @mcp.tool()
