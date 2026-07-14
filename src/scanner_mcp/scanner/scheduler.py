@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-import os
+from datetime import datetime
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
 
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
 from scanner_mcp.data.provider import DataProvider
@@ -34,9 +36,14 @@ def _tickers_for_signal(srow: SignalRow, watch: list[str]) -> list[str]:
 
 
 def _scan_job(store: Store, provider: DataProvider) -> None:
-    """APScheduler entrypoint that logs and swallows scan failures."""
+    """APScheduler entrypoint that logs and swallows scan failures.
+
+    Runs every minute; only signals whose `scan_time` matches the current
+    Eastern-time minute are actually scanned.
+    """
     try:
-        run_full_scan(store, provider, notify=True)
+        at_time = datetime.now(ET).strftime("%H:%M")
+        run_full_scan(store, provider, notify=True, at_time=at_time)
     except Exception:  # noqa: BLE001
         log.exception("scan job failed")
 
@@ -46,13 +53,19 @@ def run_full_scan(
     provider: DataProvider,
     *,
     notify: bool = True,
+    at_time: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate all enabled signals and persist alerts for triggered results.
+    """Evaluate enabled signals and persist alerts for triggered results.
 
     Each signal uses `ticker_scope`: fixed tickers, global watchlist, or all
     symbols on a configured US/crypto exchange (Yahoo screener). The result
     counts every fetched symbol/signal pair checked and includes only fired
     alerts in the `alerts` list.
+
+    `at_time`: when set (`HH:MM`, Eastern Time), only signals whose own
+    `scan_time` equals this value are scanned — used by the per-minute
+    scheduler tick. When `None`, every enabled signal is scanned regardless
+    of its configured time (used for on-demand full-scan runs).
     """
     result: dict[str, Any] = {"checked": 0, "fired": 0, "alerts": []}
     try:
@@ -63,7 +76,11 @@ def run_full_scan(
 
     for user_id in user_ids:
         try:
-            sig_rows = [s for s in store.signal_list(user_id) if s.enabled]
+            sig_rows = [
+                s
+                for s in store.signal_list(user_id)
+                if s.enabled and (at_time is None or s.scan_time == at_time)
+            ]
         except Exception:  # noqa: BLE001
             log.exception("signal list for user %s", user_id)
             continue
@@ -109,7 +126,7 @@ def run_full_scan(
                         }
                     )
                     try:
-                        store.alert_insert(user_id, srow.id, sym, det)
+                        store.alert_insert(user_id, srow.id, sym, det, source="scheduled")
                     except Exception as e:  # noqa: BLE001
                         log.error("alert_insert: %s", e)
                     if notify:
@@ -124,27 +141,23 @@ def start_scheduler(
     store: Store,
     provider: DataProvider,
 ) -> BackgroundScheduler:
-    """Start the daily end-of-day scan scheduler.
+    """Start the per-signal daily scan scheduler.
 
-    `SCAN_TIME` may be set as `HH:MM` in Eastern time; invalid values fall back
-    to 16:30 ET.
+    Each signal carries its own `scan_time` (`HH:MM`, Eastern Time, defaulting
+    to 16:30). Rather than managing one APScheduler job per signal, a single
+    job ticks every minute and `_scan_job` scans whichever signals are due
+    for the current minute.
     """
     sched = BackgroundScheduler(
-        timezone=ZoneInfo("America/New_York"),
+        timezone=ET,
         daemon=True,
     )
-    t = os.environ.get("SCAN_TIME", "16:30")
-    try:
-        parts = t.split(":")
-        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-    except (ValueError, IndexError):
-        h, m = 16, 30
     sched.add_job(
         lambda: _scan_job(store, provider),
-        CronTrigger(hour=h, minute=m, timezone=ZoneInfo("America/New_York")),
-        id="daily_scan",
+        CronTrigger(minute="*", timezone=ET),
+        id="signal_scan_tick",
         replace_existing=True,
     )
     sched.start()
-    log.info("Scheduler started, daily at %s ET", f"{h:02d}:{m:02d}")
+    log.info("Scheduler started, checking per-signal scan_time every minute (ET)")
     return sched
