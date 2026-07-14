@@ -154,6 +154,77 @@ def get_quotes(symbols: list[str]) -> str:
     return json.dumps(quotes, indent=2, default=str)
 
 
+_INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+# Widen the fetch only when the requested intraday day has no data (weekend /
+# holiday / pre-market) so we can fall back to the previous active session.
+_INTRADAY_FALLBACK_PERIOD = "7d"
+
+
+def _fetch_price_history(
+    provider: DataProvider, symbol: str, period: str, interval: str
+) -> dict[str, Any]:
+    df = provider.get_history(symbol, period=period, interval=interval)
+    if interval in _INTRADAY_INTERVALS and (df is None or getattr(df, "empty", True)):
+        df = provider.get_history(
+            symbol, period=_INTRADAY_FALLBACK_PERIOD, interval=interval
+        )
+    if df is None or getattr(df, "empty", True) or "Close" not in getattr(df, "columns", []):
+        return {"symbol": symbol.upper(), "error": "no data"}
+    # For intraday intervals, keep only the most recent trading session so the
+    # series is exactly one day's movement (today's, or the previous active day
+    # when the fallback window kicked in).
+    if interval in _INTRADAY_INTERVALS:
+        try:
+            last_day = df.index[-1].date()
+            df = df[df.index.date == last_day]
+        except Exception:  # noqa: BLE001 - non-datetime index; fall back to full frame
+            pass
+    closes = [c for c in (as_float(v) for v in df["Close"].tolist()) if c is not None]
+    if len(closes) < 2:
+        return {"symbol": symbol.upper(), "error": "no data"}
+    first, last = closes[0], closes[-1]
+    change_pct = ((last - first) / first * 100.0) if first else None
+    return {
+        "symbol": symbol.upper(),
+        "closes": [round(c, 4) for c in closes],
+        "change_pct": round(change_pct, 4) if change_pct is not None else None,
+    }
+
+
+@mcp.tool()
+def get_price_histories(
+    symbols: list[str],
+    period: str = "3mo",
+    interval: str = "1d",
+) -> str:
+    """Batch daily close-price series for lightweight sparkline / mini-chart rendering.
+
+    Returns only the sequence of closing prices per symbol (no OHLC / volume), keeping the
+    payload small enough to fetch for a whole watchlist at once. Symbols are fetched
+    concurrently; daily history is cached ~6h upstream, so warm calls return immediately.
+
+    `symbols`: list of yfinance ticker strings (e.g. `["AAPL", "TSLA"]`).
+    `period`: yfinance history window for the series, e.g. `1mo`, `3mo`, `6mo`, `1y` (default `3mo`).
+    `interval`: bar interval; `1d` (default) for a daily chart, or an intraday interval
+    (`1m`, `5m`, `15m`, `60m`, ...) for a single-session chart. For intraday intervals only one
+    trading session is returned; pass `period="1d"` and it auto-falls-back to the previous active
+    session outside market hours (weekends / holidays).
+    Returns JSON text: array of `{symbol, closes: number[], change_pct}` (oldest→newest), or
+    `{symbol, error}` for any ticker with no data. Order matches the input `symbols` order.
+    """
+    provider = get_provider()
+    if not symbols:
+        return json.dumps([])
+    with ThreadPoolExecutor(max_workers=min(24, len(symbols))) as pool:
+        histories = list(
+            pool.map(
+                lambda symbol: _fetch_price_history(provider, symbol, period, interval),
+                symbols,
+            )
+        )
+    return json.dumps(histories, default=str)
+
+
 @mcp.tool()
 def get_indicators(symbol: str, indicators: list[str], period: str = "6mo") -> str:
     """Compute indicators with buy/hold/sell rating each plus consensus.
