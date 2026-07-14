@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any, Callable
 
 from scanner_mcp.data.exchange_universe import fetch_exchange_tickers
@@ -17,6 +19,7 @@ ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y"
 ALLOWED_INTERVALS = frozenset({"1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "5d", "1wk", "1mo", "3mo"})
 INTRADAY_INTERVALS = frozenset({"1m", "2m", "5m", "15m", "30m", "60m", "1h"})
 INTRADAY_ALLOWED_HISTORY_PERIODS = frozenset({"1d", "5d", "1mo"})
+SCAN_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class ScanCancelledError(RuntimeError):
@@ -75,6 +78,18 @@ def resolve_signal_universe(signal_row: SignalRow, watchlist: list[str]) -> list
     return list(watchlist)
 
 
+def normalize_scan_time(scan_time: str | None) -> str:
+    """Normalize a per-signal daily scan time (`HH:MM`, Eastern Time).
+
+    Falls back to the `SCAN_TIME` env var (or `16:30`) when omitted, preserving
+    the previous global-default behavior for signals that don't set their own time.
+    """
+    value = str(scan_time or os.environ.get("SCAN_TIME", "16:30")).strip()
+    if not SCAN_TIME_PATTERN.match(value):
+        raise ValueError(f"invalid scan_time: {scan_time}; use 24-hour HH:MM Eastern Time, e.g. 16:30")
+    return value
+
+
 def validate_signal_creation(
     name: str,
     signal_type: str,
@@ -84,6 +99,7 @@ def validate_signal_creation(
     exchange: str | None,
     history_period: str | None = None,
     interval: str | None = None,
+    scan_time: str | None = None,
 ) -> dict[str, Any]:
     """Validate signal creation inputs and return normalized values or an error payload."""
     if signal_type not in CATALOG:
@@ -97,6 +113,7 @@ def validate_signal_creation(
         history_period_value = normalize_history_period(history_period)
         interval_value = normalize_interval(interval)
         validate_history_request_pair(history_period_value, interval_value)
+        scan_time_value = normalize_scan_time(scan_time)
     except ValueError as exc:
         return {"error": str(exc)}
     overrides: list[str] | None = None
@@ -131,6 +148,7 @@ def validate_signal_creation(
         "exchange": exchange_value,
         "history_period": history_period_value,
         "interval": interval_value,
+        "scan_time": scan_time_value,
     }
 
 
@@ -145,9 +163,12 @@ def create_signal_payload(
     exchange: str | None,
     history_period: str | None = None,
     interval: str | None = None,
+    scan_time: str | None = None,
 ) -> str:
     """Create a persisted signal or return a JSON error payload."""
-    validated = validate_signal_creation(name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval)
+    validated = validate_signal_creation(
+        name, signal_type, params, ticker_scope, ticker_overrides, exchange, history_period, interval, scan_time
+    )
     if "error" in validated:
         return json.dumps(validated)
     try:
@@ -161,6 +182,7 @@ def create_signal_payload(
             exchange=validated["exchange"],
             history_period=validated["history_period"],
             interval=validated["interval"],
+            scan_time=validated["scan_time"],
         )
     except TypeError:
         # Backward compatibility for older test doubles or stores that still expose
@@ -183,6 +205,7 @@ def create_signal_payload(
             "exchange": validated["exchange"],
             "history_period": validated["history_period"],
             "interval": validated["interval"],
+            "scan_time": validated["scan_time"],
         }
     )
 
@@ -364,6 +387,10 @@ def execute_scan(
                 continue
             if triggered:
                 fired_count += 1
+                try:
+                    store.alert_insert(user_id, signal_row.id, ticker, details, source="manual")
+                except Exception as exc:  # noqa: BLE001
+                    ticker_errors.append({"symbol": ticker, "signal_id": signal_row.id, "error": f"alert_insert: {exc}"})
                 results.append(
                     {
                         "signal_id": signal_row.id,

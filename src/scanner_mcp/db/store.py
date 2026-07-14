@@ -35,6 +35,7 @@ class SignalRow:
     created_at: str
     history_period: str = "1y"
     interval: str = "1d"
+    scan_time: str = "16:30"
     user_id: str = DEFAULT_USER_ID
 
 
@@ -45,6 +46,7 @@ class AlertRow:
     symbol: str
     triggered_at: str
     details: dict[str, Any]
+    source: str = "scheduled"
     user_id: str = DEFAULT_USER_ID
 
 
@@ -119,6 +121,7 @@ class Store:
                     exchange TEXT,
                     history_period TEXT NOT NULL DEFAULT '1y',
                     interval TEXT NOT NULL DEFAULT '1d',
+                    scan_time TEXT NOT NULL DEFAULT '16:30',
                     enabled INTEGER DEFAULT 1,
                     created_at TEXT NOT NULL,
                     UNIQUE (id, user_id)
@@ -131,6 +134,7 @@ class Store:
                     symbol TEXT NOT NULL,
                     triggered_at TEXT NOT NULL,
                     details TEXT,
+                    source TEXT NOT NULL DEFAULT 'scheduled',
                     FOREIGN KEY (signal_id, user_id) REFERENCES signals (id, user_id) ON DELETE CASCADE
                 );
 
@@ -154,6 +158,8 @@ class Store:
                 """
             )
             self._migrate_legacy_schema(c)
+            self._ensure_column(c, "signals", "scan_time", "TEXT NOT NULL DEFAULT '16:30'")
+            self._ensure_column(c, "alerts", "source", "TEXT NOT NULL DEFAULT 'scheduled'")
             c.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_watchlist_user_symbol ON watchlist (user_id, symbol);
@@ -289,6 +295,12 @@ class Store:
             """,
         )
 
+    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type_and_default: str) -> None:
+        """Add a column to an existing table if it isn't already present."""
+        cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name})")}
+        if column_name not in cols:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type_and_default}")
+
     def _ensure_user_scoped_table(
         self,
         conn: sqlite3.Connection,
@@ -381,6 +393,7 @@ class Store:
         exchange: str | None = None,
         history_period: str = "1y",
         interval: str = "1d",
+        scan_time: str = "16:30",
     ) -> int:
         """Persist an enabled signal and return its database ID."""
         now = _utc_now()
@@ -390,9 +403,9 @@ class Store:
                 """
                 INSERT INTO signals (
                     user_id, name, signal_type, params, ticker_overrides,
-                    ticker_scope, exchange, history_period, interval, enabled, created_at
+                    ticker_scope, exchange, history_period, interval, scan_time, enabled, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     user_id,
@@ -404,6 +417,7 @@ class Store:
                     exchange.strip().upper() if exchange else None,
                     history_period.strip().lower(),
                     interval.strip().lower(),
+                    scan_time.strip(),
                     now,
                 ),
             )
@@ -451,6 +465,8 @@ class Store:
         signal_id: int,
         symbol: str,
         details: dict[str, Any],
+        *,
+        source: str = "scheduled",
     ) -> int:
         """Persist one triggered alert and return its database ID."""
         now = _utc_now()
@@ -462,8 +478,8 @@ class Store:
             ).fetchone():
                 raise ValueError(f"signal {signal_id} not found for user {user_id!r}")
             c.execute(
-                "INSERT INTO alerts (user_id, signal_id, symbol, triggered_at, details) VALUES (?, ?, ?, ?, ?)",
-                (user_id, signal_id, symbol.upper(), now, json.dumps(details)),
+                "INSERT INTO alerts (user_id, signal_id, symbol, triggered_at, details, source) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, signal_id, symbol.upper(), now, json.dumps(details), source),
             )
             return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
@@ -662,6 +678,7 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
         created_at=str(r["created_at"]),
         history_period=str(r["history_period"]).strip().lower() if r["history_period"] else "1y",
         interval=str(r["interval"]).strip().lower() if r["interval"] else "1d",
+        scan_time=str(r["scan_time"]).strip() if r["scan_time"] else "16:30",
         user_id=str(r["user_id"]),
     )
 
@@ -675,6 +692,7 @@ def _row_to_alert(r: sqlite3.Row) -> AlertRow:
         symbol=str(r["symbol"]),
         triggered_at=str(r["triggered_at"]),
         details=json.loads(d) if d else {},
+        source=str(r["source"]) if r["source"] else "scheduled",
         user_id=str(r["user_id"]),
     )
 

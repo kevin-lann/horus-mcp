@@ -289,7 +289,7 @@ Optional environment variables:
 | Variable | What it does | Default |
 | --- | --- | --- |
 | `SCANNER_MCP_DB` | Path to the SQLite database file | `~/.scanner_mcp/data.db` |
-| `SCAN_TIME` | Daily scheduled scan time in Eastern Time, format `HH:MM` | `16:30` |
+| `SCAN_TIME` | Default daily scan time (Eastern Time, `HH:MM`) assigned to new signals that don't set their own `scan_time` | `16:30` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `SCANNER_MCP_LOG_FILE` | Write logs to a file in addition to stderr | not set |
 | `SCANNER_MCP_SCAN_WORKERS` | Worker threads for background scan jobs | `2` |

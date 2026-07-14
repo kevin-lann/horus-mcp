@@ -9,6 +9,7 @@ import pandas as pd
 
 from scanner_mcp.db.store import SignalRow, Store
 from scanner_mcp.scanner import scheduler
+from scanner_mcp.signals import service as signals_service
 
 
 class StoreIntegrationTest(unittest.TestCase):
@@ -54,6 +55,30 @@ class StoreIntegrationTest(unittest.TestCase):
             self.assertTrue(store.signal_delete("user-a", sid))
             self.assertIsNone(store.signal_get("user-a", sid))
             self.assertEqual(store.alerts_recent("user-a"), [])
+
+    def test_signal_scan_time_defaults_and_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "test.db")
+
+            default_sid = store.signal_create("user-a", "Default Time", "rsi_oversold", {}, ["spy"], ticker_scope="tickers")
+            custom_sid = store.signal_create(
+                "user-a", "Custom Time", "rsi_oversold", {}, ["qqq"], ticker_scope="tickers", scan_time="09:45"
+            )
+
+            self.assertEqual(store.signal_get("user-a", default_sid).scan_time, "16:30")  # type: ignore[union-attr]
+            self.assertEqual(store.signal_get("user-a", custom_sid).scan_time, "09:45")  # type: ignore[union-attr]
+
+    def test_alert_insert_defaults_to_scheduled_and_accepts_explicit_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "test.db")
+            sid = store.signal_create("user-a", "RSI", "rsi_oversold", {}, ["spy"], ticker_scope="tickers")
+
+            scheduled_id = store.alert_insert("user-a", sid, "spy", {"x": 1})
+            manual_id = store.alert_insert("user-a", sid, "spy", {"x": 2}, source="manual")
+
+            alerts = {a.id: a for a in store.alerts_recent("user-a")}
+            self.assertEqual(alerts[scheduled_id].source, "scheduled")
+            self.assertEqual(alerts[manual_id].source, "manual")
 
     def test_scan_jobs_are_user_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -114,6 +139,64 @@ class SchedulerTest(unittest.TestCase):
     def test_scan_job_swallows_exceptions(self) -> None:
         with patch("scanner_mcp.scanner.scheduler.run_full_scan", side_effect=RuntimeError("boom")):
             scheduler._scan_job(object(), object())  # type: ignore[arg-type]
+
+    def test_run_full_scan_at_time_only_scans_signals_due_now(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "test.db")
+            store.watchlist_add("user-a", ["SPY"])
+            due_sid = store.signal_create("user-a", "Due", "rsi_oversold", {}, None, scan_time="09:45")
+            not_due_sid = store.signal_create("user-a", "Not due", "rsi_oversold", {}, None, scan_time="16:30")
+
+            class Provider:
+                def get_history(self, symbol: str, *, period: str, interval: str) -> pd.DataFrame:
+                    return pd.DataFrame({"Close": [1.0, 2.0]})
+
+            with (
+                patch("scanner_mcp.scanner.scheduler.evaluate", return_value=(True, {"rsi": 20.0})),
+                patch("scanner_mcp.scanner.scheduler.notify_desktop"),
+            ):
+                result = scheduler.run_full_scan(store, Provider(), notify=False, at_time="09:45")  # type: ignore[arg-type]
+
+            self.assertEqual(result["checked"], 1)
+            fired_signal_ids = {a["signal_id"] for a in result["alerts"]}
+            self.assertEqual(fired_signal_ids, {due_sid})
+            self.assertNotIn(not_due_sid, fired_signal_ids)
+
+
+class ExecuteScanAlertPersistenceTest(unittest.TestCase):
+    """`execute_scan` backs both `run_scan` and `start_scan` — both should persist
+    triggered alerts for saved-signal scans, but never for ad-hoc `all_signal_types`
+    scans, since those have no persisted `signal_id` to attach an alert to."""
+
+    class Provider:
+        def get_history(self, symbol: str, *, period: str, interval: str) -> pd.DataFrame:
+            return pd.DataFrame({"Close": [1.0, 2.0]})
+
+    def test_saved_signal_scan_persists_alert_with_manual_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "test.db")
+            sid = store.signal_create("user-a", "RSI", "rsi_oversold", {}, ["SPY"], ticker_scope="tickers")
+
+            with patch("scanner_mcp.signals.service.evaluate", return_value=(True, {"rsi": 20.0})):
+                payload = signals_service.execute_scan(store, self.Provider(), user_id="user-a", signal_id=sid)
+
+            self.assertEqual(payload["count"], 1)
+            alerts = store.alerts_recent("user-a")
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0].source, "manual")
+            self.assertEqual(alerts[0].signal_id, sid)
+
+    def test_all_signal_types_scan_does_not_persist_any_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "test.db")
+
+            with patch("scanner_mcp.signals.service.evaluate", return_value=(True, {"rsi": 20.0})):
+                payload = signals_service.execute_scan(
+                    store, self.Provider(), user_id="user-a", all_signal_types=True, symbol="SPY"
+                )
+
+            self.assertGreater(payload["count"], 0)
+            self.assertEqual(store.alerts_recent("user-a"), [])
 
 
 if __name__ == "__main__":

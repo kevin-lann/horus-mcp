@@ -321,6 +321,7 @@ def create_signal(
     exchange: str | None = None,
     history_period: Annotated[str, Field(description=YFINANCE_PERIOD_DESC)] = "1y",
     interval: Annotated[str, Field(description="yfinance bar size for signal evaluation, e.g. 1d, 1wk, 1mo.")] = "1d",
+    scan_time: Annotated[str, Field(description="Daily scheduled scan time, 24-hour HH:MM Eastern Time, e.g. 16:30.")] = "16:30",
 ) -> str:
     """Create a persisted enabled signal row.
 
@@ -333,6 +334,7 @@ def create_signal(
     `exchange`: when scope is `exchange`, exactly `NYSE`, `NASDAQ`, `AMEX`, or `CRYPTO` (omit otherwise).
     `history_period`: yfinance history window fetched for this signal, e.g. `1y`, `2y`, `5y`, `max`.
     `interval`: yfinance bar interval for this signal, e.g. `1d`, `1wk`, `1mo`.
+    `scan_time`: time of day the scheduled scan runs for this signal, 24-hour `HH:MM` Eastern Time.
     """
     return create_signal_payload(
         get_store(),
@@ -345,6 +347,7 @@ def create_signal(
         exchange,
         history_period,
         interval,
+        scan_time,
     )
 
 
@@ -364,6 +367,7 @@ def list_signals() -> str:
             "exchange": row.exchange,
             "history_period": row.history_period,
             "interval": row.interval,
+            "scan_time": row.scan_time,
             "enabled": row.enabled,
         }
         for row in rows
@@ -805,7 +809,17 @@ def chart_log_cycle(
 def resource_triggered(user_id: str) -> str:
     """Last 50 fired alerts for one user (JSON)."""
     rows = get_store().alerts_recent(user_id, 50)
-    payload = [{"id": row.id, "signal_id": row.signal_id, "symbol": row.symbol, "triggered_at": row.triggered_at, "details": row.details} for row in rows]
+    payload = [
+        {
+            "id": row.id,
+            "signal_id": row.signal_id,
+            "symbol": row.symbol,
+            "triggered_at": row.triggered_at,
+            "details": row.details,
+            "source": row.source,
+        }
+        for row in rows
+    ]
     return json.dumps(payload, default=str, indent=2)
 
 
