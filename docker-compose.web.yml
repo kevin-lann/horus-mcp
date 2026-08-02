@@ -1,15 +1,17 @@
 services:
+  # Shares the same Turso database as `backend`, keyed by the same Clerk user_id.
+  # Set TURSO_DATABASE_URL=file:./.data/scanner.db (no token needed) to test this
+  # compose file locally without a real Turso account.
   mcp-server:
     build:
       context: .
     environment:
       SCANNER_MCP_HTTP_HOST: 0.0.0.0
       SCANNER_MCP_HTTP_PORT: 5050
-      SCANNER_MCP_DB: /data/scanner.db
+      TURSO_DATABASE_URL: ${TURSO_DATABASE_URL}
+      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN}
     expose:
       - "5050"
-    volumes:
-      - scanner-mcp-data:/data
 
   backend:
     build:
@@ -21,6 +23,7 @@ services:
       MCP_SERVER_URL: http://mcp-server:5050/mcp
       MCP_SERVER_TRANSPORT: http
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+      BYOK_ENCRYPTION_KEY: ${BYOK_ENCRYPTION_KEY}
       TURSO_DATABASE_URL: ${TURSO_DATABASE_URL}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN}
     ports:
@@ -37,6 +40,3 @@ services:
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
     ports:
       - "3000:3000"
-
-volumes:
-  scanner-mcp-data:

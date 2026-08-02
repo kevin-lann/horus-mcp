@@ -288,7 +288,9 @@ Optional environment variables:
 
 | Variable | What it does | Default |
 | --- | --- | --- |
-| `SCANNER_MCP_DB` | Path to the SQLite database file | `~/.scanner_mcp/data.db` |
+| `SCANNER_MCP_DB` | Path to the SQLite database file. Ignored if `TURSO_DATABASE_URL` is set. | `~/.scanner_mcp/data.db` |
+| `TURSO_DATABASE_URL` | Optional. `libsql://...` to connect to a remote Turso database (requires `TURSO_AUTH_TOKEN` and the `turso` extra, see below) instead of local SQLite. A `file:...` value is treated as a local SQLite path, e.g. for testing without a Turso account. | not set |
+| `TURSO_AUTH_TOKEN` | Auth token for `TURSO_DATABASE_URL` when it's a `libsql://` URL | not set |
 | `SCAN_TIME` | Default daily scan time (Eastern Time, `HH:MM`) assigned to new signals that don't set their own `scan_time` | `16:30` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `SCANNER_MCP_LOG_FILE` | Write logs to a file in addition to stderr | not set |
@@ -297,6 +299,15 @@ Optional environment variables:
 | `SCANNER_MCP_EXCHANGE_MAX_SYMBOLS` | Optional cap on exchange universe size | not set |
 | `ALPHA_VANTAGE_API_KEY` | Enables Alpha Vantage fundamentals data where used | not set |
 | `ENABLE_DEBUG_PNG` | Saves chart debug PNGs when enabled (`1`, `true`, `yes`, `on`) | off |
+
+Standalone/local usage (Claude Desktop, Cursor, stdio) never needs Turso — it just
+works against local SQLite with zero configuration. Turso is only for the shared
+web deployment, where this server and the web backend read/write the same
+database. To use it, install with the `turso` extra:
+
+```bash
+pip install -e '.[turso]'
+```
 
 ## Tools
 

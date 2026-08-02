@@ -58,11 +58,24 @@ def shutdown_scan_executor() -> None:
 
 
 def get_store() -> Store:
-    """Lazily create the SQLite store, honoring SCANNER_MCP_DB."""
+    """Lazily create the store.
+
+    - `TURSO_DATABASE_URL=libsql://...` (+ `TURSO_AUTH_TOKEN`): remote Turso, shared
+      with the web backend.
+    - `TURSO_DATABASE_URL=file:...`: local SQLite at that path (e.g. for compose
+      testing without a real Turso account).
+    - Otherwise: local SQLite honoring `SCANNER_MCP_DB`, or `~/.scanner_mcp/data.db`.
+      This is the standalone MCP default and never requires Turso.
+    """
     global _store
     if _store is None:
-        path = os.environ.get("SCANNER_MCP_DB")
-        _store = Store(path)
+        turso_url = os.environ.get("TURSO_DATABASE_URL", "").strip()
+        if turso_url.startswith("libsql://"):
+            _store = Store(turso_url=turso_url, turso_auth_token=os.environ.get("TURSO_AUTH_TOKEN"))
+        elif turso_url.startswith("file:"):
+            _store = Store(turso_url[len("file:") :])
+        else:
+            _store = Store(os.environ.get("SCANNER_MCP_DB"))
     return _store
 
 
