@@ -309,6 +309,51 @@ database. To use it, install with the `turso` extra:
 pip install -e '.[turso]'
 ```
 
+## Deployment
+
+This section covers the private web deployment only — the `mcp-tools` sidecar
+container of the `scanner-web-backend` Cloud Run service, which shares that
+service with `horus-scanner-server`'s `api-gateway` container. Standalone MCP
+usage (Claude Desktop, Cursor, stdio) doesn't involve any of this.
+
+### Auto-deploy (CI)
+
+Every push to `master` that passes tests triggers [`.github/workflows/tests.yml`](.github/workflows/tests.yml),
+which builds the image via Cloud Build, tags it with the commit SHA, and
+updates *only* the `mcp-tools` container of the Cloud Run service — the
+`api-gateway` container (deployed independently from `horus-scanner-server`)
+is untouched. Auth is via Workload Identity Federation (no long-lived key):
+the `github-deployer` service account can only be impersonated from the
+`kevin-lann/horus-mcp` and `kevin-lann/horus-scanner-server` repos.
+
+### Manual deploy
+
+```bash
+gcloud builds submit \
+  --tag us-central1-docker.pkg.dev/gen-lang-client-0305286339/scanner/scanner-mcp:latest \
+  --project gen-lang-client-0305286339
+```
+
+```bash
+gcloud run services update scanner-web-backend \
+  --region us-central1 \
+  --project gen-lang-client-0305286339 \
+  --container mcp-tools \
+  --image us-central1-docker.pkg.dev/gen-lang-client-0305286339/scanner/scanner-mcp:latest
+```
+
+`--container` updates that one container in place — it does not touch
+`api-gateway`'s image, env vars, or secrets. Verify with:
+
+```bash
+curl -s https://scanner-web-backend-429301876637.us-central1.run.app/health
+```
+
+First-time infra setup (Artifact Registry repo, Secret Manager secrets, the
+`scanner-web-backend` service itself, the Turso database) isn't covered here —
+see [`horus-scanner-server/README.md#deployment`](../horus-scanner-server/README.md#deployment)
+for the full picture, since that's the repo owning `cloudrun.yaml`.
+
 ## Tools
 
 ### Market Data
