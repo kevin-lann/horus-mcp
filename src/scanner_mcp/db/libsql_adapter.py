@@ -18,7 +18,11 @@ class Row:
 
     def __getitem__(self, key: Any) -> Any:
         if isinstance(key, str):
-            return self._values[self._columns.index(key)]
+            try:
+                idx = next(i for i, c in enumerate(self._columns) if c.lower() == key.lower())
+            except StopIteration:
+                raise IndexError(key) from None
+            return self._values[idx]
         return self._values[key]
 
     def __iter__(self) -> Iterator[Any]:

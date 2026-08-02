@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -16,6 +17,11 @@ from scanner_mcp.db import libsql_adapter
 DEFAULT_USER_ID = "local_admin"
 
 DBConnection = sqlite3.Connection | libsql_adapter.ConnectionAdapter
+
+# Number of long-lived Turso connections kept in the pool. Bounds concurrent
+# outstanding requests to the remote database without serializing every
+# operation behind a single process-wide mutex.
+_TURSO_POOL_SIZE = 5
 
 
 @dataclass
@@ -84,9 +90,10 @@ class Store:
     """Thread-safe store for user-scoped persistence, backed by local SQLite or remote Turso.
 
     Pass `turso_url`/`turso_auth_token` to use a remote `libsql://` Turso database
-    (a single long-lived connection is reused across calls). Otherwise this is a
-    local SQLite file at `path` (or the default `~/.scanner_mcp/data.db`), opening
-    and closing a connection per operation as before.
+    (a small pool of long-lived connections is reused across calls, so concurrent
+    operations aren't serialized behind a single network round trip). Otherwise
+    this is a local SQLite file at `path` (or the default `~/.scanner_mcp/data.db`),
+    opening and closing a connection per operation as before.
     """
 
     def __init__(
@@ -100,40 +107,54 @@ class Store:
         self._turso_auth_token = turso_auth_token or ""
         self._path = None if self._turso_url else (Path(path) if path else _default_db_path())
         self._lock = threading.RLock()
-        self._libsql_conn: libsql_adapter.ConnectionAdapter | None = None
+        self._libsql_pool: queue.Queue[libsql_adapter.ConnectionAdapter | None] | None = None
+        if self._turso_url:
+            self._libsql_pool = queue.Queue()
+            for _ in range(_TURSO_POOL_SIZE):
+                self._libsql_pool.put(None)
         self._init_schema()
 
-    def _libsql_connection(self) -> libsql_adapter.ConnectionAdapter:
-        """Return the (lazily-created) long-lived Turso connection."""
-        if self._libsql_conn is None:
-            self._libsql_conn = libsql_adapter.connect(self._turso_url, self._turso_auth_token)  # type: ignore[arg-type]
-        return self._libsql_conn
+    def _acquire_libsql_connection(self) -> libsql_adapter.ConnectionAdapter:
+        """Take a connection from the pool, lazily opening one if this slot is unused."""
+        assert self._libsql_pool is not None
+        c = self._libsql_pool.get()
+        if c is None:
+            c = libsql_adapter.connect(self._turso_url, self._turso_auth_token)  # type: ignore[arg-type]
+        return c
 
     @contextmanager
     def _conn(self) -> Iterator[DBConnection]:
-        """Yield a locked database connection and commit after successful use.
+        """Yield a database connection and commit after successful use.
 
-        The Turso connection is long-lived and reused across calls, so a failed
-        operation must roll back explicitly rather than rely on closing the
-        connection to discard it.
+        Local SQLite opens and closes a fresh connection per call, guarded by a
+        process-wide lock. Turso connections are pooled and long-lived, so a
+        failed operation must roll back explicitly rather than rely on closing
+        the connection to discard it; pool checkout/checkin bounds concurrency
+        without holding a lock across the network round trip.
         """
-        with self._lock:
-            if self._turso_url:
-                c = self._libsql_connection()
-                close_after = False
-            else:
-                c = sqlite3.connect(self._path)
-                c.row_factory = sqlite3.Row
-                close_after = True
-            c.execute("PRAGMA foreign_keys = ON")
+        if self._turso_url:
+            c = self._acquire_libsql_connection()
             try:
+                c.execute("PRAGMA foreign_keys = ON")
                 yield c
                 c.commit()
             except Exception:
                 c.rollback()
                 raise
             finally:
-                if close_after:
+                self._libsql_pool.put(c)  # type: ignore[union-attr]
+        else:
+            with self._lock:
+                c = sqlite3.connect(self._path)
+                c.row_factory = sqlite3.Row
+                c.execute("PRAGMA foreign_keys = ON")
+                try:
+                    yield c
+                    c.commit()
+                except Exception:
+                    c.rollback()
+                    raise
+                finally:
                     c.close()
 
     def _init_schema(self) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -21,6 +22,7 @@ from scanner_mcp.signals.service import ScanCancelledError, execute_scan
 log = logging.getLogger(__name__)
 
 _store: Store | None = None
+_store_lock = threading.Lock()
 _provider: DataProvider | None = None
 _sched: BaseScheduler | None = None
 _scan_executor: ThreadPoolExecutor | None = None
@@ -64,18 +66,27 @@ def get_store() -> Store:
       with the web backend.
     - `TURSO_DATABASE_URL=file:...`: local SQLite at that path (e.g. for compose
       testing without a real Turso account).
-    - Otherwise: local SQLite honoring `SCANNER_MCP_DB`, or `~/.scanner_mcp/data.db`.
+    - Unset: local SQLite honoring `SCANNER_MCP_DB`, or `~/.scanner_mcp/data.db`.
       This is the standalone MCP default and never requires Turso.
+    - Set to anything else: raises, since a typo'd or unrecognized URL silently
+      falling back to local SQLite would defeat the shared web deployment.
     """
     global _store
     if _store is None:
-        turso_url = os.environ.get("TURSO_DATABASE_URL", "").strip()
-        if turso_url.startswith("libsql://"):
-            _store = Store(turso_url=turso_url, turso_auth_token=os.environ.get("TURSO_AUTH_TOKEN"))
-        elif turso_url.startswith("file:"):
-            _store = Store(turso_url[len("file:") :])
-        else:
-            _store = Store(os.environ.get("SCANNER_MCP_DB"))
+        with _store_lock:
+            if _store is None:
+                turso_url = os.environ.get("TURSO_DATABASE_URL", "").strip()
+                if turso_url.startswith("libsql://"):
+                    _store = Store(turso_url=turso_url, turso_auth_token=os.environ.get("TURSO_AUTH_TOKEN"))
+                elif turso_url.startswith("file:"):
+                    _store = Store(turso_url[len("file:") :])
+                elif turso_url:
+                    raise RuntimeError(
+                        "TURSO_DATABASE_URL is set but not recognized (expected it to start "
+                        f"with 'libsql://' or 'file:'): {turso_url!r}"
+                    )
+                else:
+                    _store = Store(os.environ.get("SCANNER_MCP_DB"))
     return _store
 
 
