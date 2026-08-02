@@ -199,5 +199,55 @@ class ExecuteScanAlertPersistenceTest(unittest.TestCase):
             self.assertEqual(store.alerts_recent("user-a"), [])
 
 
+class TursoBackendTest(unittest.TestCase):
+    """Exercises `db/libsql_adapter.py` via `Store(turso_url=...)`, using a local
+    embedded libsql database in place of a real Turso account -- the adapter code
+    path is otherwise only reachable with a live `libsql://` URL."""
+
+    def _require_libsql(self) -> None:
+        try:
+            import libsql  # noqa: F401
+        except ImportError:
+            self.skipTest("libsql package not installed (pip install 'horus-mcp[turso]')")
+
+    def test_watchlist_and_signal_lifecycle_over_libsql_adapter(self) -> None:
+        self._require_libsql()
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(turso_url=str(Path(td) / "turso.db"), turso_auth_token="")
+
+            self.assertEqual(store.watchlist_add("user-a", ["aapl", "AAPL", "msft"]), ["AAPL", "MSFT"])
+            self.assertEqual([w.symbol for w in store.watchlist_get("user-a")], ["AAPL", "MSFT"])
+
+            sid = store.signal_create(
+                "user-a", "Dip", "pct_from_ath", {"min_pct_below_ath": 10}, ["spy"], ticker_scope="tickers"
+            )
+            sig = store.signal_get("user-a", sid)
+            self.assertIsNotNone(sig)
+            assert sig is not None
+            self.assertEqual(sig.ticker_overrides, ["spy"])
+
+            aid = store.alert_insert("user-a", sid, "spy", {"x": 1})
+            alerts = store.alerts_recent("user-a")
+            self.assertEqual(alerts[0].id, aid)
+            self.assertEqual(alerts[0].details, {"x": 1})
+
+    def test_failed_operation_rolls_back_the_shared_connection(self) -> None:
+        self._require_libsql()
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(turso_url=str(Path(td) / "turso.db"), turso_auth_token="")
+            store.watchlist_add("user-a", ["AAPL"])
+
+            with self.assertRaises(RuntimeError):
+                with store._conn() as c:
+                    c.execute(
+                        "INSERT INTO watchlist (user_id, symbol, added_at) VALUES (?, ?, ?)",
+                        ("user-a", "ZZZZ", "now"),
+                    )
+                    raise RuntimeError("boom")
+
+            self.assertEqual([w.symbol for w in store.watchlist_get("user-a")], ["AAPL"])
+            self.assertEqual(store.watchlist_add("user-a", ["TSLA"]), ["TSLA"])
+
+
 if __name__ == "__main__":
     unittest.main()

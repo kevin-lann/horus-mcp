@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -11,7 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from scanner_mcp.db import libsql_adapter
+
 DEFAULT_USER_ID = "local_admin"
+
+DBConnection = sqlite3.Connection | libsql_adapter.ConnectionAdapter
+
+# Number of long-lived Turso connections kept in the pool. Bounds concurrent
+# outstanding requests to the remote database without serializing every
+# operation behind a single process-wide mutex.
+_TURSO_POOL_SIZE = 5
 
 
 @dataclass
@@ -77,25 +87,75 @@ def _default_db_path() -> Path:
 
 
 class Store:
-    """Thread-safe SQLite store for user-scoped persistence."""
+    """Thread-safe store for user-scoped persistence, backed by local SQLite or remote Turso.
 
-    def __init__(self, path: Path | str | None = None) -> None:
-        self._path = Path(path) if path else _default_db_path()
+    Pass `turso_url`/`turso_auth_token` to use a remote `libsql://` Turso database
+    (a small pool of long-lived connections is reused across calls, so concurrent
+    operations aren't serialized behind a single network round trip). Otherwise
+    this is a local SQLite file at `path` (or the default `~/.scanner_mcp/data.db`),
+    opening and closing a connection per operation as before.
+    """
+
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        turso_url: str | None = None,
+        turso_auth_token: str | None = None,
+    ) -> None:
+        self._turso_url = turso_url.strip() if turso_url else None
+        self._turso_auth_token = turso_auth_token or ""
+        self._path = None if self._turso_url else (Path(path) if path else _default_db_path())
         self._lock = threading.RLock()
+        self._libsql_pool: queue.Queue[libsql_adapter.ConnectionAdapter | None] | None = None
+        if self._turso_url:
+            self._libsql_pool = queue.Queue()
+            for _ in range(_TURSO_POOL_SIZE):
+                self._libsql_pool.put(None)
         self._init_schema()
 
+    def _acquire_libsql_connection(self) -> libsql_adapter.ConnectionAdapter:
+        """Take a connection from the pool, lazily opening one if this slot is unused."""
+        assert self._libsql_pool is not None
+        c = self._libsql_pool.get()
+        if c is None:
+            c = libsql_adapter.connect(self._turso_url, self._turso_auth_token)  # type: ignore[arg-type]
+        return c
+
     @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        """Yield a locked SQLite connection and commit after successful use."""
-        with self._lock:
-            c = sqlite3.connect(self._path)
-            c.row_factory = sqlite3.Row
-            c.execute("PRAGMA foreign_keys = ON")
+    def _conn(self) -> Iterator[DBConnection]:
+        """Yield a database connection and commit after successful use.
+
+        Local SQLite opens and closes a fresh connection per call, guarded by a
+        process-wide lock. Turso connections are pooled and long-lived, so a
+        failed operation must roll back explicitly rather than rely on closing
+        the connection to discard it; pool checkout/checkin bounds concurrency
+        without holding a lock across the network round trip.
+        """
+        if self._turso_url:
+            c = self._acquire_libsql_connection()
             try:
+                c.execute("PRAGMA foreign_keys = ON")
                 yield c
                 c.commit()
+            except Exception:
+                c.rollback()
+                raise
             finally:
-                c.close()
+                self._libsql_pool.put(c)  # type: ignore[union-attr]
+        else:
+            with self._lock:
+                c = sqlite3.connect(self._path)
+                c.row_factory = sqlite3.Row
+                c.execute("PRAGMA foreign_keys = ON")
+                try:
+                    yield c
+                    c.commit()
+                except Exception:
+                    c.rollback()
+                    raise
+                finally:
+                    c.close()
 
     def _init_schema(self) -> None:
         """Create tables and indexes if this is a fresh database."""
@@ -169,7 +229,7 @@ class Store:
                 """
             )
 
-    def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
+    def _migrate_legacy_schema(self, conn: DBConnection) -> None:
         """Upgrade older single-user tables to the current user-scoped schema."""
         self._ensure_user_scoped_table(
             conn,
@@ -295,7 +355,7 @@ class Store:
             """,
         )
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type_and_default: str) -> None:
+    def _ensure_column(self, conn: DBConnection, table_name: str, column_name: str, column_type_and_default: str) -> None:
         """Add a column to an existing table if it isn't already present."""
         cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name})")}
         if column_name not in cols:
@@ -303,7 +363,7 @@ class Store:
 
     def _ensure_user_scoped_table(
         self,
-        conn: sqlite3.Connection,
+        conn: DBConnection,
         *,
         table_name: str,
         create_sql: str,
@@ -662,7 +722,7 @@ class Store:
             return (cur.rowcount or 0) > 0
 
 
-def _row_to_signal(r: sqlite3.Row) -> SignalRow:
+def _row_to_signal(r: sqlite3.Row | libsql_adapter.Row) -> SignalRow:
     """Convert a SQLite signal row into a typed dataclass."""
     ov = r["ticker_overrides"]
     ov_list = json.loads(ov) if ov else None
@@ -683,7 +743,7 @@ def _row_to_signal(r: sqlite3.Row) -> SignalRow:
     )
 
 
-def _row_to_alert(r: sqlite3.Row) -> AlertRow:
+def _row_to_alert(r: sqlite3.Row | libsql_adapter.Row) -> AlertRow:
     """Convert a SQLite alert row into a typed dataclass."""
     d = r["details"]
     return AlertRow(
@@ -697,7 +757,7 @@ def _row_to_alert(r: sqlite3.Row) -> AlertRow:
     )
 
 
-def _row_to_scan_job(r: sqlite3.Row) -> ScanJobRow:
+def _row_to_scan_job(r: sqlite3.Row | libsql_adapter.Row) -> ScanJobRow:
     """Convert a SQLite scan job row into a typed dataclass."""
     payload = r["result_json"]
     return ScanJobRow(
