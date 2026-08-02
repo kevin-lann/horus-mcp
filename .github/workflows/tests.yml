@@ -64,8 +64,16 @@ jobs:
 
       - name: Build and push image
         run: |
+          # --gcs-source-staging-dir avoids gcloud's default bucket auto-discovery,
+          # which needs project-wide storage.buckets.list -- github-deployer only
+          # has bucket-scoped storage.admin on this one bucket, not project-wide.
+          # --gcs-log-dir avoids the default (Cloud Logging-backed) logs bucket,
+          # which requires the primitive Viewer/Owner role to stream from --
+          # granting that is broader than this SA needs.
           gcloud builds submit \
             --tag "$REPO/scanner-mcp:${{ github.sha }}" \
+            --gcs-source-staging-dir="gs://${PROJECT_ID}_cloudbuild/source" \
+            --gcs-log-dir="gs://${PROJECT_ID}_cloudbuild/logs" \
             --project "$PROJECT_ID"
           gcloud artifacts docker tags add \
             "$REPO/scanner-mcp:${{ github.sha }}" "$REPO/scanner-mcp:latest" \
