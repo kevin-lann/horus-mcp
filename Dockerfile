@@ -14,6 +14,39 @@ COPY src ./src
 
 RUN pip install --no-cache-dir '.[turso]'
 
+# Kaleido (used to render charts to PNG) requires a real Chrome binary since
+# kaleido 1.x -- it no longer bundles Chromium. Install Chrome's headless
+# runtime deps plus a pinned Chrome-for-Testing build, and point kaleido at
+# it via BROWSER_PATH so it's found regardless of which user/HOME runs it.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fonts-liberation \
+    libasound2t64 \
+    libatk-bridge2.0-0t64 \
+    libatk1.0-0t64 \
+    libatspi2.0-0t64 \
+    libcairo2 \
+    libcups2t64 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libglib2.0-0t64 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libxshmfence1 \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/chrome-for-testing && plotly_get_chrome -y --path /opt/chrome-for-testing
+ENV BROWSER_PATH=/opt/chrome-for-testing/chrome-linux64/chrome
+
 EXPOSE 5050
 
 # Create a non-root user and group for the app
