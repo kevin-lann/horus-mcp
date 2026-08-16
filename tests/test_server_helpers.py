@@ -248,6 +248,45 @@ class ServerHelpersTest(unittest.TestCase):
 
         self.assertEqual(result, {"error": "no data"})
 
+    def test_get_price_histories_ohlc_returns_bars_and_no_data_error(self) -> None:
+        index = pd.date_range("2024-01-01", periods=3, freq="D")
+        df = pd.DataFrame(
+            {
+                "Open": [10.0, 11.0, 12.0],
+                "High": [10.5, 11.5, 12.5],
+                "Low": [9.5, 10.5, 11.5],
+                "Close": [10.2, 11.2, 12.2],
+                "Volume": [1000, 1100, 1200],
+            },
+            index=index,
+        )
+        provider = FakeProvider(history=df)
+
+        with patch("scanner_mcp.server.get_provider", return_value=provider):
+            result = json.loads(server.get_price_histories_ohlc(["spy", "qqq"]))
+
+        self.assertEqual(len(result), 2)
+        spy = result[0]
+        self.assertEqual(spy["symbol"], "SPY")
+        self.assertEqual(len(spy["timestamps"]), 3)
+        self.assertEqual(spy["open"], [10.0, 11.0, 12.0])
+        self.assertEqual(spy["high"], [10.5, 11.5, 12.5])
+        self.assertEqual(spy["low"], [9.5, 10.5, 11.5])
+        self.assertEqual(spy["close"], [10.2, 11.2, 12.2])
+        self.assertEqual(spy["volume"], [1000, 1100, 1200])
+        self.assertEqual(result[1]["symbol"], "QQQ")
+
+        empty_provider = FakeProvider(history=pd.DataFrame())
+        with patch("scanner_mcp.server.get_provider", return_value=empty_provider):
+            empty_result = json.loads(server.get_price_histories_ohlc(["spy"]))
+        self.assertEqual(empty_result, [{"symbol": "SPY", "error": "no data"}])
+
+    def test_get_price_histories_ohlc_returns_empty_list_for_no_symbols(self) -> None:
+        provider = FakeProvider(history=pd.DataFrame())
+        with patch("scanner_mcp.server.get_provider", return_value=provider):
+            result = json.loads(server.get_price_histories_ohlc([]))
+        self.assertEqual(result, [])
+
     def test_run_scan_payload_records_persisted_history_fetch_errors(self) -> None:
         class FakeStore:
             def watchlist_get(self, _user_id):  # noqa: ANN001

@@ -164,16 +164,17 @@ def _fetch_price_history(
     provider: DataProvider, symbol: str, period: str, interval: str
 ) -> dict[str, Any]:
     df = provider.get_history(symbol, period=period, interval=interval)
-    if interval in _INTRADAY_INTERVALS and (df is None or getattr(df, "empty", True)):
+    if interval in _INTRADAY_INTERVALS and period == "1d" and (df is None or getattr(df, "empty", True)):
         df = provider.get_history(
             symbol, period=_INTRADAY_FALLBACK_PERIOD, interval=interval
         )
     if df is None or getattr(df, "empty", True) or "Close" not in getattr(df, "columns", []):
         return {"symbol": symbol.upper(), "error": "no data"}
-    # For intraday intervals, keep only the most recent trading session so the
-    # series is exactly one day's movement (today's, or the previous active day
-    # when the fallback window kicked in).
-    if interval in _INTRADAY_INTERVALS:
+    # Only single-day requests collapse to the most recent trading session
+    # (today's, or the previous active day when the fallback window kicked
+    # in). Multi-day periods at an intraday interval (e.g. `5d`/`15m`) keep
+    # every session the provider returned.
+    if interval in _INTRADAY_INTERVALS and period == "1d":
         try:
             last_day = df.index[-1].date()
             df = df[df.index.date == last_day]
@@ -219,6 +220,95 @@ def get_price_histories(
         histories = list(
             pool.map(
                 lambda symbol: _fetch_price_history(provider, symbol, period, interval),
+                symbols,
+            )
+        )
+    return json.dumps(histories, default=str)
+
+
+def _fetch_price_history_ohlc(
+    provider: DataProvider, symbol: str, period: str, interval: str
+) -> dict[str, Any]:
+    df = provider.get_history(symbol, period=period, interval=interval)
+    if interval in _INTRADAY_INTERVALS and period == "1d" and (df is None or getattr(df, "empty", True)):
+        df = provider.get_history(
+            symbol, period=_INTRADAY_FALLBACK_PERIOD, interval=interval
+        )
+    if df is None or getattr(df, "empty", True) or "Close" not in getattr(df, "columns", []):
+        return {"symbol": symbol.upper(), "error": "no data"}
+    # Only single-day requests collapse to the most recent trading session
+    # (today's, or the previous active day when the fallback window kicked
+    # in). Multi-day periods at an intraday interval (e.g. `5d`/`15m`) keep
+    # every session the provider returned.
+    if interval in _INTRADAY_INTERVALS and period == "1d":
+        try:
+            last_day = df.index[-1].date()
+            df = df[df.index.date == last_day]
+        except Exception:  # noqa: BLE001 - non-datetime index; fall back to full frame
+            pass
+    timestamps: list[str] = []
+    opens: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    closes: list[float] = []
+    volumes: list[int] = []
+    for ts, row in df.iterrows():
+        o = as_float(row.get("Open"))
+        h = as_float(row.get("High"))
+        l = as_float(row.get("Low"))
+        c = as_float(row.get("Close"))
+        if o is None or h is None or l is None or c is None:
+            continue
+        timestamps.append(ts.isoformat() if hasattr(ts, "isoformat") else str(ts))
+        opens.append(round(o, 4))
+        highs.append(round(h, 4))
+        lows.append(round(l, 4))
+        closes.append(round(c, 4))
+        v = as_float(row.get("Volume"))
+        volumes.append(int(v) if v is not None else 0)
+    if len(closes) < 2:
+        return {"symbol": symbol.upper(), "error": "no data"}
+    return {
+        "symbol": symbol.upper(),
+        "timestamps": timestamps,
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": volumes,
+    }
+
+
+@mcp.tool()
+def get_price_histories_ohlc(
+    symbols: list[str],
+    period: str = "3mo",
+    interval: str = "1d",
+) -> str:
+    """Batch OHLCV history series for candlestick charting.
+
+    Unlike `get_price_histories` (close-only, for sparklines), this returns full
+    open/high/low/close/volume bars per symbol so a candlestick chart can render
+    wicks and bodies. Symbols are fetched concurrently; daily history is cached
+    ~6h upstream, so warm calls return immediately.
+
+    `symbols`: list of yfinance ticker strings (e.g. `["AAPL", "TSLA"]`).
+    `period`: yfinance history window for the series, e.g. `1mo`, `3mo`, `6mo`, `1y` (default `3mo`).
+    `interval`: bar interval; `1d` (default) for a daily chart, or an intraday interval
+    (`1m`, `5m`, `15m`, `60m`, ...) for a single-session chart. For intraday intervals only one
+    trading session is returned; pass `period="1d"` and it auto-falls-back to the previous active
+    session outside market hours (weekends / holidays).
+    Returns JSON text: array of `{symbol, timestamps: string[], open: number[], high: number[],
+    low: number[], close: number[], volume: number[]}` (oldest→newest, ISO8601 timestamps), or
+    `{symbol, error}` for any ticker with no data. Order matches the input `symbols` order.
+    """
+    provider = get_provider()
+    if not symbols:
+        return json.dumps([])
+    with ThreadPoolExecutor(max_workers=min(24, len(symbols))) as pool:
+        histories = list(
+            pool.map(
+                lambda symbol: _fetch_price_history_ohlc(provider, symbol, period, interval),
                 symbols,
             )
         )
